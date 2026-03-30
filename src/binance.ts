@@ -11,21 +11,65 @@ config();
 
 // ===== 設定 =====
 
+/** Testnet URL 白名單 */
+const TESTNET_DOMAINS = ['testnet.binance.vision'];
+
+/** Mainnet URL 白名單 */
+const MAINNET_DOMAINS = ['api.binance.com', 'api1.binance.com', 'api2.binance.com', 'api3.binance.com', 'api4.binance.com'];
+
 /** 允許的 BASE_URL 白名單 */
 const ALLOWED_BASE_URLS = [
-  'https://testnet.binance.vision',
-  'https://api.binance.com',
+  ...TESTNET_DOMAINS.map((d) => `https://${d}`),
+  ...MAINNET_DOMAINS.map((d) => `https://${d}`),
 ];
 
 const BASE_URL = process.env.BINANCE_BASE_URL ?? 'https://testnet.binance.vision';
 const IS_TESTNET = process.env.BINANCE_TESTNET === 'true';
 
-// 啟動時驗證 BASE_URL
-if (!ALLOWED_BASE_URLS.includes(BASE_URL)) {
-  console.error(`❌ BASE_URL 不在白名單中：${BASE_URL}`);
-  console.error(`   允許的 URL：${ALLOWED_BASE_URLS.join(', ')}`);
-  process.exit(1);
+/** 從 URL 中擷取 domain */
+function extractDomain(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }
+
+/** 啟動時交叉驗證 BINANCE_TESTNET 與 BINANCE_BASE_URL 的一致性 */
+function validateEnvConsistency(): void {
+  // 先檢查白名單
+  if (!ALLOWED_BASE_URLS.includes(BASE_URL)) {
+    throw new Error(
+      `❌ BASE_URL 不在白名單中：${BASE_URL}\n` +
+      `   允許的 URL：${ALLOWED_BASE_URLS.join(', ')}`,
+    );
+  }
+
+  const domain = extractDomain(BASE_URL);
+  const isTestnetUrl = TESTNET_DOMAINS.includes(domain);
+  const isMainnetUrl = MAINNET_DOMAINS.includes(domain);
+
+  // BINANCE_TESTNET 未設定或為空 → 視為主網
+  const envTestnet = process.env.BINANCE_TESTNET;
+  const effectiveTestnet = envTestnet === 'true';
+
+  if (effectiveTestnet && isMainnetUrl) {
+    throw new Error(
+      `❌ 環境變數不一致：BINANCE_TESTNET=true 但 BASE_URL 指向主網 (${domain})\n` +
+      `   請修正 .env：若要使用測試網，BASE_URL 應為 https://testnet.binance.vision`,
+    );
+  }
+
+  if (!effectiveTestnet && isTestnetUrl) {
+    throw new Error(
+      `❌ 環境變數不一致：BINANCE_TESTNET 不是 true 但 BASE_URL 指向測試網 (${domain})\n` +
+      `   請修正 .env：若要使用測試網，請設定 BINANCE_TESTNET=true`,
+    );
+  }
+}
+
+// 模組載入時執行交叉驗證
+validateEnvConsistency();
 
 /** Mainnet 安全確認 */
 const LIVE_TRADING_CONFIRM = process.env.LIVE_TRADING_CONFIRM ?? '';
@@ -296,6 +340,43 @@ export interface OrderResponse {
   type: string;
   side: string;
   fills?: OrderFill[];
+}
+
+/** 計算扣除手續費後的淨數量（BUY 時基礎幣手續費扣除） */
+export function getNetQuantity(order: OrderResponse, baseAsset: string): string {
+  if (!order.fills || order.fills.length === 0) return order.executedQty;
+  let totalQty = 0;
+  let totalCommissionInBase = 0;
+  for (const fill of order.fills) {
+    totalQty += parseFloat(fill.qty);
+    if (fill.commissionAsset === baseAsset) {
+      totalCommissionInBase += parseFloat(fill.commission);
+    }
+  }
+  return (totalQty - totalCommissionInBase).toFixed(8);
+}
+
+/** 計算總手續費 */
+export function getTotalCommission(order: OrderResponse): { amount: number; asset: string } {
+  if (!order.fills || order.fills.length === 0) return { amount: 0, asset: 'UNKNOWN' };
+  let total = 0;
+  const asset = order.fills[0].commissionAsset;
+  for (const fill of order.fills) {
+    total += parseFloat(fill.commission);
+  }
+  return { amount: total, asset };
+}
+
+/** 從 symbol 中擷取 baseAsset（如 BTCUSDT → BTC） */
+export function extractBaseAsset(symbol: string): string {
+  const quoteAssets = ['USDT', 'BUSD', 'USDC', 'BTC', 'ETH', 'BNB'];
+  const upper = symbol.toUpperCase();
+  for (const quote of quoteAssets) {
+    if (upper.endsWith(quote)) {
+      return upper.slice(0, -quote.length);
+    }
+  }
+  return upper;
 }
 
 /** 從 FULL 回應計算實際成交均價 */

@@ -187,6 +187,9 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       const actualPrice = getAvgFillPrice(order);
       const actualQty = order.executedQty;
 
+      // 計算 PnL
+      const pnl = (parseFloat(actualPrice) - parseFloat(position.entryPrice)) * parseFloat(actualQty);
+
       // 下單成功後才關閉本地部位
       closePosition(this.name, symbol);
 
@@ -210,6 +213,7 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         orderId: order.orderId,
         reason: result.reason,
         timestamp: Date.now(),
+        pnl,
       };
     }
 

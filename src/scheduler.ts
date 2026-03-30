@@ -69,12 +69,21 @@ export function parseInterval(interval: string): number {
   }
   const value = parseInt(match[1], 10);
   const unit = match[2];
+
+  if (value <= 0) throw new Error('間隔值必須大於 0');
+  if (unit === 'm' && value < 1) throw new Error('最小間隔為 1 分鐘');
+  if (unit === 'd' && value > 30) throw new Error('最大間隔為 30 天');
+
+  let ms: number;
   switch (unit) {
-    case 'm': return value * 60 * 1000;
-    case 'h': return value * 60 * 60 * 1000;
-    case 'd': return value * 24 * 60 * 60 * 1000;
+    case 'm': ms = value * 60 * 1000; break;
+    case 'h': ms = value * 60 * 60 * 1000; break;
+    case 'd': ms = value * 24 * 60 * 60 * 1000; break;
     default: throw new Error(`未知時間單位：${unit}`);
   }
+
+  if (ms < 60000) throw new Error('間隔不得小於 1 分鐘');
+  return ms;
 }
 
 /** 產生自動交易 key */

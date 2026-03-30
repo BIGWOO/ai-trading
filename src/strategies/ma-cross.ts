@@ -2,13 +2,17 @@
  * 均線交叉策略
  * 短期 MA7 上穿 MA25 → 買入（黃金交叉）
  * 短期 MA7 下穿 MA25 → 賣出（死亡交叉）
+ *
+ * 含部位管理：BUY 前檢查是否已持倉，SELL 時賣出完整部位
+ * 分析時排除最後一根未收盤 K 線
  */
 
 import {
   getKlines, getPrice, placeOrder, getAccountInfo,
-  calculateMA,
+  calculateMA, getSymbolPrecision, adjustQuantity,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
+import { hasPosition, openPosition, closePosition } from '../position.js';
 import type { Strategy, BacktestableStrategy, AnalysisResult } from './base.js';
 
 const SHORT_PERIOD = 7;
@@ -21,9 +25,11 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
   description: `MA${SHORT_PERIOD} / MA${LONG_PERIOD} 交叉訊號`,
 
   async analyze(symbol: string): Promise<AnalysisResult> {
-    // 取得足夠的 K 線計算長期均線
-    const klines = await getKlines(symbol, '1h', LONG_PERIOD + 5);
-    const closePrices = klines.map((k) => k.close);
+    // 多拉一根，排除最後未收盤的 K 線
+    const klines = await getKlines(symbol, '1h', LONG_PERIOD + 6);
+    // 排除最後一根未收盤 K 線
+    const closedKlines = klines.slice(0, -1);
+    const closePrices = closedKlines.map((k) => k.close);
     return this.analyzeKlines(closePrices, closePrices.length - 1);
   },
 
@@ -42,7 +48,6 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
     }
 
     // 取最近兩根均線值，判斷交叉
-    // shortMA 和 longMA 長度不同，需要對齊
     const shortCurrent = parseFloat(shortMA[shortMA.length - 1]);
     const shortPrev = parseFloat(shortMA[shortMA.length - 2]);
     const longCurrent = parseFloat(longMA[longMA.length - 1]);
@@ -89,16 +94,25 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
       return;
     }
 
-    const account = await getAccountInfo();
     const priceInfo = await getPrice(symbol);
     const price = priceInfo.price;
 
     if (result.signal === 'BUY') {
-      // 用 USDT 餘額買入
+      // 檢查是否已有部位，避免重複加碼
+      if (hasPosition(this.name, symbol)) {
+        console.log(`⏸️ [${this.name}] 已有 ${symbol} 部位，跳過買入`);
+        return;
+      }
+
+      const account = await getAccountInfo();
       const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
       const available = parseFloat(usdtBalance?.free ?? '0');
       const tradeAmount = available * TRADE_RATIO;
-      const quantity = (tradeAmount / parseFloat(price)).toFixed(5);
+
+      // 使用 Exchange Info 調整精度
+      const precision = await getSymbolPrecision(symbol);
+      const rawQty = tradeAmount / parseFloat(price);
+      const quantity = adjustQuantity(precision.stepSize, rawQty);
 
       if (parseFloat(quantity) <= 0) {
         console.log('⚠️ USDT 餘額不足，無法買入');
@@ -106,7 +120,17 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
       }
 
       console.log(`🟢 [${this.name}] 買入 ${symbol}: ${quantity} @ ${price}`);
-      const order = await placeOrder(symbol, 'BUY', 'MARKET', quantity);
+      const order = await placeOrder(symbol, 'BUY', 'MARKET', quantity, price);
+
+      // 記錄部位
+      openPosition({
+        strategy: this.name,
+        symbol,
+        entryPrice: price,
+        quantity,
+        orderId: order.orderId,
+      });
+
       await recordTrade({
         timestamp: Date.now(),
         symbol,
@@ -120,19 +144,18 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
     }
 
     if (result.signal === 'SELL') {
-      // 賣出持有的幣
-      const base = symbol.replace('USDT', '');
-      const baseBalance = account.balances.find((b) => b.asset === base);
-      const available = parseFloat(baseBalance?.free ?? '0');
-      const quantity = (available * TRADE_RATIO).toFixed(5);
-
-      if (parseFloat(quantity) <= 0) {
-        console.log(`⚠️ ${base} 餘額不足，無法賣出`);
+      // 取得該策略建立的部位，賣出完整數量
+      const position = closePosition(this.name, symbol);
+      if (!position) {
+        console.log(`⏸️ [${this.name}] 沒有 ${symbol} 部位，跳過賣出`);
         return;
       }
 
-      console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ${price}`);
-      const order = await placeOrder(symbol, 'SELL', 'MARKET', quantity);
+      const quantity = position.quantity;
+
+      console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ${price}（完整平倉）`);
+      const order = await placeOrder(symbol, 'SELL', 'MARKET', quantity, price);
+
       await recordTrade({
         timestamp: Date.now(),
         symbol,

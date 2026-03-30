@@ -2,13 +2,24 @@
  * 網格交易策略
  * 在指定價格區間內等距掛買賣單
  * 適合震盪行情
+ *
+ * 含狀態持久化：不會每次都 destructive reset
+ * 執行前檢查是否已有活躍網格，只補缺失的單
  */
 
 import {
   getPrice, placeOrder, getOpenOrders, cancelOrder, getAccountInfo,
+  getSymbolPrecision, adjustQuantity, adjustPrice,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
 import type { Strategy, AnalysisResult } from './base.js';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = join(__dirname, '..', '..', 'data');
+const GRID_STATE_FILE = join(DATA_DIR, 'grid-state.json');
 
 interface GridConfig {
   /** 價格上限 */
@@ -21,10 +32,84 @@ interface GridConfig {
   quantityPerGrid: string;
 }
 
+interface GridState {
+  /** 交易對 */
+  symbol: string;
+  /** 建立時間 */
+  createdAt: number;
+  /** 價格上限 */
+  upperPrice: number;
+  /** 價格下限 */
+  lowerPrice: number;
+  /** 網格數量 */
+  gridCount: number;
+  /** 每格數量 */
+  quantityPerGrid: string;
+  /** 網格價格列表 */
+  gridPrices: string[];
+  /** 是否活躍 */
+  active: boolean;
+}
+
 /** 預設網格設定（會根據當前價格自動調整） */
 const DEFAULT_GRID_PERCENT = 0.05; // 上下 5% 區間
 const DEFAULT_GRID_COUNT = 10;
 const DEFAULT_TRADE_RATIO = 0.05; // 每格用 5% 餘額
+
+// ===== 網格狀態管理 =====
+
+function ensureDataDir(): void {
+  if (!existsSync(DATA_DIR)) {
+    mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function readGridState(symbol: string): GridState | null {
+  ensureDataDir();
+  if (!existsSync(GRID_STATE_FILE)) return null;
+  try {
+    const raw = readFileSync(GRID_STATE_FILE, 'utf-8');
+    const states = JSON.parse(raw) as GridState[];
+    return states.find((s) => s.symbol === symbol.toUpperCase() && s.active) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeGridState(state: GridState): void {
+  ensureDataDir();
+  let states: GridState[] = [];
+  if (existsSync(GRID_STATE_FILE)) {
+    try {
+      states = JSON.parse(readFileSync(GRID_STATE_FILE, 'utf-8')) as GridState[];
+    } catch {
+      states = [];
+    }
+  }
+
+  // 替換同幣對的活躍狀態
+  const filtered = states.filter(
+    (s) => !(s.symbol === state.symbol && s.active),
+  );
+  filtered.push(state);
+  writeFileSync(GRID_STATE_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
+}
+
+function deactivateGridState(symbol: string): void {
+  ensureDataDir();
+  if (!existsSync(GRID_STATE_FILE)) return;
+  try {
+    const states = JSON.parse(readFileSync(GRID_STATE_FILE, 'utf-8')) as GridState[];
+    for (const s of states) {
+      if (s.symbol === symbol.toUpperCase() && s.active) {
+        s.active = false;
+      }
+    }
+    writeFileSync(GRID_STATE_FILE, JSON.stringify(states, null, 2), 'utf-8');
+  } catch {
+    // 忽略
+  }
+}
 
 export const gridStrategy: Strategy = {
   name: '網格交易策略',
@@ -33,6 +118,24 @@ export const gridStrategy: Strategy = {
   async analyze(symbol: string): Promise<AnalysisResult> {
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);
+
+    // 檢查是否已有活躍網格
+    const existingGrid = readGridState(symbol);
+    if (existingGrid) {
+      return {
+        signal: 'BUY', // 表示要管理網格
+        strength: 0.3,
+        reason: [
+          `📊 發現既有網格：`,
+          `   價格區間: ${existingGrid.lowerPrice.toFixed(2)} ~ ${existingGrid.upperPrice.toFixed(2)}`,
+          `   網格數: ${existingGrid.gridCount}`,
+          `   每格數量: ${existingGrid.quantityPerGrid}`,
+          `   當前價格: ${currentPrice.toFixed(2)}`,
+          `   模式: 補單（不重建）`,
+        ].join('\n'),
+        price: priceInfo.price,
+      };
+    }
 
     // 根據當前價格自動計算網格區間
     const upperPrice = currentPrice * (1 + DEFAULT_GRID_PERCENT);
@@ -48,6 +151,7 @@ export const gridStrategy: Strategy = {
         `   網格數: ${DEFAULT_GRID_COUNT}`,
         `   每格間距: ${gridSize.toFixed(2)}`,
         `   當前價格: ${currentPrice.toFixed(2)}`,
+        `   模式: 新建`,
       ].join('\n'),
       price: priceInfo.price,
     };
@@ -57,18 +161,60 @@ export const gridStrategy: Strategy = {
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);
     const account = await getAccountInfo();
+    const upperSymbol = symbol.toUpperCase();
+
+    // 取得精度資訊
+    const precision = await getSymbolPrecision(upperSymbol);
 
     // 計算可用餘額和每格數量
     const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
     const available = parseFloat(usdtBalance?.free ?? '0');
     const perGridAmount = available * DEFAULT_TRADE_RATIO;
-    const quantityPerGrid = (perGridAmount / currentPrice).toFixed(5);
+    const rawQty = perGridAmount / currentPrice;
+    const quantityPerGrid = adjustQuantity(precision.stepSize, rawQty);
 
     if (parseFloat(quantityPerGrid) <= 0) {
       console.log('⚠️ USDT 餘額不足，無法建立網格');
       return;
     }
 
+    // 檢查是否有既有活躍網格
+    const existingGrid = readGridState(upperSymbol);
+    const openOrders = await getOpenOrders(upperSymbol);
+
+    if (existingGrid) {
+      // 補單模式：檢查缺失的格位
+      console.log(`\n📐 [${this.name}] 補單模式...`);
+      console.log(`   💰 當前價格: ${currentPrice.toFixed(2)}`);
+
+      const existingPrices = new Set(openOrders.map((o) => o.price));
+      let addedCount = 0;
+
+      for (const gridPrice of existingGrid.gridPrices) {
+        if (existingPrices.has(gridPrice)) continue; // 已有此價位的單
+
+        const gridPriceNum = parseFloat(gridPrice);
+        try {
+          if (gridPriceNum < currentPrice) {
+            await placeOrder(upperSymbol, 'BUY', 'LIMIT', existingGrid.quantityPerGrid, gridPrice);
+            addedCount++;
+            console.log(`   🟢 補買單 @ ${gridPrice}`);
+          } else if (gridPriceNum > currentPrice) {
+            await placeOrder(upperSymbol, 'SELL', 'LIMIT', existingGrid.quantityPerGrid, gridPrice);
+            addedCount++;
+            console.log(`   🔴 補賣單 @ ${gridPrice}`);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(`   ⚠️ 補單失敗 @ ${gridPrice}: ${msg}`);
+        }
+      }
+
+      console.log(`\n✅ 補單完成！新增 ${addedCount} 筆掛單`);
+      return;
+    }
+
+    // 新建模式
     const config: GridConfig = {
       upperPrice: currentPrice * (1 + DEFAULT_GRID_PERCENT),
       lowerPrice: currentPrice * (1 - DEFAULT_GRID_PERCENT),
@@ -76,39 +222,40 @@ export const gridStrategy: Strategy = {
       quantityPerGrid,
     };
 
-    console.log(`\n📐 [${this.name}] 建立網格...`);
+    console.log(`\n📐 [${this.name}] 建立新網格...`);
     console.log(`   💰 當前價格: ${currentPrice.toFixed(2)}`);
     console.log(`   📏 區間: ${config.lowerPrice.toFixed(2)} ~ ${config.upperPrice.toFixed(2)}`);
     console.log(`   🔢 網格數: ${config.gridCount}`);
     console.log(`   📦 每格數量: ${config.quantityPerGrid}`);
 
     // 先取消所有現有掛單
-    const openOrders = await getOpenOrders(symbol);
     if (openOrders.length > 0) {
       console.log(`\n🗑️ 取消 ${openOrders.length} 筆現有掛單...`);
       for (const order of openOrders) {
-        await cancelOrder(symbol, order.orderId);
+        await cancelOrder(upperSymbol, order.orderId);
       }
+      deactivateGridState(upperSymbol);
     }
 
     // 計算每格價格
     const gridSize = (config.upperPrice - config.lowerPrice) / config.gridCount;
     let buyCount = 0;
     let sellCount = 0;
+    const gridPrices: string[] = [];
 
     for (let i = 0; i <= config.gridCount; i++) {
-      const gridPrice = (config.lowerPrice + gridSize * i).toFixed(2);
+      const rawPrice = config.lowerPrice + gridSize * i;
+      const gridPrice = adjustPrice(precision.tickSize, rawPrice);
       const gridPriceNum = parseFloat(gridPrice);
+      gridPrices.push(gridPrice);
 
       try {
         if (gridPriceNum < currentPrice) {
-          // 低於當前價格 → 掛買單
-          await placeOrder(symbol, 'BUY', 'LIMIT', config.quantityPerGrid, gridPrice);
+          await placeOrder(upperSymbol, 'BUY', 'LIMIT', config.quantityPerGrid, gridPrice);
           buyCount++;
           console.log(`   🟢 買單 @ ${gridPrice}`);
         } else if (gridPriceNum > currentPrice) {
-          // 高於當前價格 → 掛賣單
-          await placeOrder(symbol, 'SELL', 'LIMIT', config.quantityPerGrid, gridPrice);
+          await placeOrder(upperSymbol, 'SELL', 'LIMIT', config.quantityPerGrid, gridPrice);
           sellCount++;
           console.log(`   🔴 賣單 @ ${gridPrice}`);
         }
@@ -118,18 +265,32 @@ export const gridStrategy: Strategy = {
       }
     }
 
+    // 儲存網格狀態
+    writeGridState({
+      symbol: upperSymbol,
+      createdAt: Date.now(),
+      upperPrice: config.upperPrice,
+      lowerPrice: config.lowerPrice,
+      gridCount: config.gridCount,
+      quantityPerGrid: config.quantityPerGrid,
+      gridPrices,
+      active: true,
+    });
+
     console.log(`\n✅ 網格建立完成！買單 ${buyCount} 筆 / 賣單 ${sellCount} 筆`);
 
-    // 記錄網格建立
-    await recordTrade({
-      timestamp: Date.now(),
-      symbol,
-      side: 'BUY',
-      price: String(currentPrice),
-      quantity: '0',
-      strategy: this.name,
-      orderId: 0,
-      reason: `建立網格：${config.lowerPrice.toFixed(2)}~${config.upperPrice.toFixed(2)}，${config.gridCount} 格`,
-    });
+    // 只在有實際掛單時記錄（不寫 quantity=0 的假記錄）
+    if (buyCount + sellCount > 0) {
+      await recordTrade({
+        timestamp: Date.now(),
+        symbol: upperSymbol,
+        side: 'BUY',
+        price: String(currentPrice),
+        quantity: String(buyCount + sellCount), // 掛單數量
+        strategy: this.name,
+        orderId: 0,
+        reason: `建立網格：${config.lowerPrice.toFixed(2)}~${config.upperPrice.toFixed(2)}，買${buyCount}/賣${sellCount}`,
+      });
+    }
   },
 };

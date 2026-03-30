@@ -2,13 +2,17 @@
  * RSI 策略
  * RSI < 30 → 超賣，買入
  * RSI > 70 → 超買，賣出
+ *
+ * 含部位管理：BUY 前檢查是否已持倉，SELL 時賣出完整部位
+ * 分析時排除最後一根未收盤 K 線
  */
 
 import {
   getKlines, getPrice, placeOrder, getAccountInfo,
-  calculateRSI,
+  calculateRSI, getSymbolPrecision, adjustQuantity,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
+import { hasPosition, openPosition, closePosition } from '../position.js';
 import type { Strategy, BacktestableStrategy, AnalysisResult } from './base.js';
 
 const RSI_PERIOD = 14;
@@ -21,8 +25,11 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
   description: `RSI(${RSI_PERIOD}) 超買超賣訊號`,
 
   async analyze(symbol: string): Promise<AnalysisResult> {
-    const klines = await getKlines(symbol, '1h', RSI_PERIOD + 20);
-    const closePrices = klines.map((k) => k.close);
+    // 多拉一根，排除最後未收盤的 K 線
+    const klines = await getKlines(symbol, '1h', RSI_PERIOD + 21);
+    // 排除最後一根未收盤 K 線
+    const closedKlines = klines.slice(0, -1);
+    const closePrices = closedKlines.map((k) => k.close);
     return this.analyzeKlines(closePrices, closePrices.length - 1);
   },
 
@@ -75,15 +82,25 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       return;
     }
 
-    const account = await getAccountInfo();
     const priceInfo = await getPrice(symbol);
     const price = priceInfo.price;
 
     if (result.signal === 'BUY') {
+      // 檢查是否已有部位，避免重複加碼
+      if (hasPosition(this.name, symbol)) {
+        console.log(`⏸️ [${this.name}] 已有 ${symbol} 部位，跳過買入`);
+        return;
+      }
+
+      const account = await getAccountInfo();
       const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
       const available = parseFloat(usdtBalance?.free ?? '0');
       const tradeAmount = available * TRADE_RATIO;
-      const quantity = (tradeAmount / parseFloat(price)).toFixed(5);
+
+      // 使用 Exchange Info 調整精度
+      const precision = await getSymbolPrecision(symbol);
+      const rawQty = tradeAmount / parseFloat(price);
+      const quantity = adjustQuantity(precision.stepSize, rawQty);
 
       if (parseFloat(quantity) <= 0) {
         console.log('⚠️ USDT 餘額不足，無法買入');
@@ -91,7 +108,17 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       }
 
       console.log(`🟢 [${this.name}] 買入 ${symbol}: ${quantity} @ ${price}`);
-      const order = await placeOrder(symbol, 'BUY', 'MARKET', quantity);
+      const order = await placeOrder(symbol, 'BUY', 'MARKET', quantity, price);
+
+      // 記錄部位
+      openPosition({
+        strategy: this.name,
+        symbol,
+        entryPrice: price,
+        quantity,
+        orderId: order.orderId,
+      });
+
       await recordTrade({
         timestamp: Date.now(),
         symbol,
@@ -105,18 +132,18 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
     }
 
     if (result.signal === 'SELL') {
-      const base = symbol.replace('USDT', '');
-      const baseBalance = account.balances.find((b) => b.asset === base);
-      const available = parseFloat(baseBalance?.free ?? '0');
-      const quantity = (available * TRADE_RATIO).toFixed(5);
-
-      if (parseFloat(quantity) <= 0) {
-        console.log(`⚠️ ${base} 餘額不足，無法賣出`);
+      // 取得該策略建立的部位，賣出完整數量
+      const position = closePosition(this.name, symbol);
+      if (!position) {
+        console.log(`⏸️ [${this.name}] 沒有 ${symbol} 部位，跳過賣出`);
         return;
       }
 
-      console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ${price}`);
-      const order = await placeOrder(symbol, 'SELL', 'MARKET', quantity);
+      const quantity = position.quantity;
+
+      console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ${price}（完整平倉）`);
+      const order = await placeOrder(symbol, 'SELL', 'MARKET', quantity, price);
+
       await recordTrade({
         timestamp: Date.now(),
         symbol,

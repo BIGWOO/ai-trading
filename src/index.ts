@@ -23,7 +23,8 @@ import { maCrossStrategy } from './strategies/ma-cross.js';
 import { rsiStrategy } from './strategies/rsi.js';
 import { gridStrategy } from './strategies/grid.js';
 import { getTrades, getPerformance } from './storage.js';
-import type { Strategy } from './strategies/base.js';
+import { getKlines } from './binance.js';
+import type { Strategy, BacktestableStrategy } from './strategies/base.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -216,6 +217,11 @@ async function main() {
         break;
       case 'performance':
         await handlePerformance();
+        break;
+      case 'backtest':
+        if (!arg1) { console.log('❌ 請指定策略，例如：ma-cross'); break; }
+        console.log(`\n💡 回測請使用獨立腳本以獲得完整功能：`);
+        console.log(`   npx tsx scripts/backtest.ts ${arg1} ${arg2 ?? 'BTCUSDT'}`);
         break;
       default:
         console.log(`❌ 未知命令：${command}`);

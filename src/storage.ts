@@ -192,7 +192,7 @@ export async function getPerformance(filter?: TradeFilter): Promise<Performance>
   }
 
   const winTrades = pnlList.filter((p) => p > 0);
-  const lossTrades = pnlList.filter((p) => p <= 0);
+  const lossTrades = pnlList.filter((p) => p < 0); // PnL=0 不算虧損
   const totalPnL = pnlList.reduce((sum, p) => sum + p, 0);
 
   // 計算最大回撤

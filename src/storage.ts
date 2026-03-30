@@ -1,6 +1,7 @@
 /**
  * 交易記錄模組
  * 用本地 JSON 檔存交易記錄，並提供績效分析
+ * 績效計算使用 FIFO 按數量撮合
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -100,27 +101,33 @@ export async function getTrades(filter?: TradeFilter): Promise<TradeRecord[]> {
   let trades = readTrades();
 
   if (filter) {
-    if (filter.symbol) {
-      trades = trades.filter((t) => t.symbol === filter.symbol.toUpperCase());
+    const filterSymbol = filter.symbol;
+    const filterSide = filter.side;
+    const filterStrategy = filter.strategy;
+    const filterStartTime = filter.startTime;
+    const filterEndTime = filter.endTime;
+
+    if (filterSymbol) {
+      trades = trades.filter((t) => t.symbol === filterSymbol.toUpperCase());
     }
-    if (filter.side) {
-      trades = trades.filter((t) => t.side === filter.side);
+    if (filterSide) {
+      trades = trades.filter((t) => t.side === filterSide);
     }
-    if (filter.strategy) {
-      trades = trades.filter((t) => t.strategy === filter.strategy);
+    if (filterStrategy) {
+      trades = trades.filter((t) => t.strategy === filterStrategy);
     }
-    if (filter.startTime) {
-      trades = trades.filter((t) => t.timestamp >= filter.startTime!);
+    if (filterStartTime !== undefined) {
+      trades = trades.filter((t) => t.timestamp >= filterStartTime);
     }
-    if (filter.endTime) {
-      trades = trades.filter((t) => t.timestamp <= filter.endTime!);
+    if (filterEndTime !== undefined) {
+      trades = trades.filter((t) => t.timestamp <= filterEndTime);
     }
   }
 
   return trades;
 }
 
-/** 計算績效 */
+/** 計算績效（FIFO 按數量撮合） */
 export async function getPerformance(filter?: TradeFilter): Promise<Performance> {
   const trades = await getTrades(filter);
 
@@ -142,19 +149,42 @@ export async function getPerformance(filter?: TradeFilter): Promise<Performance>
   const buyCount = trades.filter((t) => t.side === 'BUY').length;
   const sellCount = trades.filter((t) => t.side === 'SELL').length;
 
-  // 計算損益：配對買賣交易
-  // 簡單方法：按時間順序，每個 SELL 匹配最近的 BUY
+  // FIFO 按數量撮合
+  interface BuyEntry {
+    price: number;
+    remainingQty: number;
+  }
+
+  const buyStack: BuyEntry[] = [];
   const pnlList: number[] = [];
-  const buyStack: TradeRecord[] = [];
 
   for (const trade of trades) {
+    const qty = parseFloat(trade.quantity);
+    const price = parseFloat(trade.price);
+
     if (trade.side === 'BUY') {
-      buyStack.push(trade);
-    } else if (trade.side === 'SELL' && buyStack.length > 0) {
-      const buyTrade = buyStack.shift()!;
-      const buyValue = parseFloat(buyTrade.price) * parseFloat(buyTrade.quantity);
-      const sellValue = parseFloat(trade.price) * parseFloat(trade.quantity);
-      pnlList.push(sellValue - buyValue);
+      buyStack.push({ price, remainingQty: qty });
+    } else if (trade.side === 'SELL') {
+      // 從 FIFO 堆疊消耗數量
+      let remainingSellQty = qty;
+      let sellPnL = 0;
+
+      while (remainingSellQty > 0 && buyStack.length > 0) {
+        const buyEntry = buyStack[0];
+        const matchQty = Math.min(remainingSellQty, buyEntry.remainingQty);
+
+        sellPnL += matchQty * (price - buyEntry.price);
+        buyEntry.remainingQty -= matchQty;
+        remainingSellQty -= matchQty;
+
+        // 如果這筆買入已消耗完，移除
+        if (buyEntry.remainingQty <= 1e-10) {
+          buyStack.shift();
+        }
+      }
+
+      // 未配對的賣出部分忽略（可能是外部轉入的幣）
+      pnlList.push(sellPnL);
     }
   }
 

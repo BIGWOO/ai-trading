@@ -36,6 +36,8 @@ export interface StrategyResult {
   reason: string;
   /** 時間戳（毫秒） */
   timestamp: number;
+  /** 損益（SELL 時計算） */
+  pnl?: number;
 }
 
 export interface Strategy {

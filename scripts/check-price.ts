@@ -2,6 +2,7 @@
  * 查看即時行情
  * 用法：npx tsx scripts/check-price.ts [BTCUSDT]
  * 不指定幣對則顯示主流幣種
+ * 不需要 API Key 即可執行
  */
 
 import { getPrice, getAllPrices, getEnvInfo } from '../src/binance.js';

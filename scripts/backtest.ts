@@ -2,6 +2,11 @@
  * 歷史 K 線回測
  * 用法：npx tsx scripts/backtest.ts <策略> [幣對] [K線間隔] [K線數量]
  * 範例：npx tsx scripts/backtest.ts ma-cross BTCUSDT 1h 500
+ *
+ * 修正：
+ * - 排除最後一根未收盤 K 線
+ * - 買入時記錄實際 buyPrice，賣出時正確計算 PnL
+ * - capital 追蹤完全正確
  */
 
 import { getKlines, getEnvInfo } from '../src/binance.js';
@@ -59,11 +64,14 @@ async function main() {
   console.log('');
 
   try {
+    // 多拉一根，排除最後未收盤 K 線
     console.log('📥 下載歷史 K 線...');
-    const klines = await getKlines(symbol, interval, limit);
+    const rawKlines = await getKlines(symbol, interval, limit + 1);
+    // 排除最後一根未收盤 K 線
+    const klines = rawKlines.slice(0, -1);
     const closePrices = klines.map((k) => k.close);
 
-    console.log(`✅ 取得 ${klines.length} 根 K 線`);
+    console.log(`✅ 取得 ${klines.length} 根已收盤 K 線`);
     console.log(`📅 期間：${new Date(klines[0].openTime).toLocaleString()} ~ ${new Date(klines[klines.length - 1].closeTime).toLocaleString()}`);
     console.log('');
 
@@ -97,17 +105,17 @@ async function main() {
       return;
     }
 
-    // 配對交易，計算損益
+    // 配對交易，正確計算損益
     const initialCapital = 10000; // 假設初始資金 10000 USDT
     let capital = initialCapital;
     let holdings = 0;
+    let buyPrice = 0; // 記錄實際買入價格
     let winCount = 0;
     let lossCount = 0;
     let maxWin = 0;
     let maxLoss = 0;
     let peak = initialCapital;
     let maxDrawdown = 0;
-    const pnlHistory: number[] = [];
 
     console.log('  交易記錄：');
     console.log('  ──────────────────────────────────────────');
@@ -117,21 +125,22 @@ async function main() {
       const price = parseFloat(trade.price);
 
       if (trade.side === 'BUY') {
-        // 用全部資金買入
+        // 用全部資金買入，記錄買入價格
+        buyPrice = price;
         holdings = capital / price;
         capital = 0;
-        console.log(`  🟢 ${time} 買入 @ ${price.toFixed(2)}`);
+        console.log(`  🟢 ${time} 買入 @ ${price.toFixed(2)} (數量: ${holdings.toFixed(6)})`);
       } else {
-        // 全部賣出
+        // 全部賣出，PnL = holdings * sellPrice - holdings * buyPrice
         const sellValue = holdings * price;
-        const buyValue = initialCapital - (capital + sellValue - initialCapital);
-        const pnl = sellValue - (initialCapital - capital);
+        const costBasis = holdings * buyPrice;
+        const pnl = sellValue - costBasis;
         capital = sellValue;
         holdings = 0;
+        buyPrice = 0;
 
         if (pnl > 0) { winCount++; maxWin = Math.max(maxWin, pnl); }
         else { lossCount++; maxLoss = Math.min(maxLoss, pnl); }
-        pnlHistory.push(pnl);
 
         // 計算回撤
         if (capital > peak) peak = capital;

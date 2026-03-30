@@ -12,7 +12,7 @@ import {
   calculateRSI, getSymbolPrecision, adjustQuantity,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
-import { hasPosition, openPosition, closePosition } from '../position.js';
+import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
 import type { Strategy, BacktestableStrategy, AnalysisResult } from './base.js';
 
 const RSI_PERIOD = 14;
@@ -132,8 +132,8 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
     }
 
     if (result.signal === 'SELL') {
-      // 取得該策略建立的部位，賣出完整數量
-      const position = closePosition(this.name, symbol);
+      // 先查部位（不刪除），確認下單成功後才 close
+      const position = getPosition(this.name, symbol);
       if (!position) {
         console.log(`⏸️ [${this.name}] 沒有 ${symbol} 部位，跳過賣出`);
         return;
@@ -143,6 +143,9 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
 
       console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ${price}（完整平倉）`);
       const order = await placeOrder(symbol, 'SELL', 'MARKET', quantity, price);
+
+      // 下單成功後才關閉本地部位
+      closePosition(this.name, symbol);
 
       await recordTrade({
         timestamp: Date.now(),

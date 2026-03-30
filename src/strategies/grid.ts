@@ -11,6 +11,7 @@ import {
   getPrice, placeOrder, getOpenOrders, cancelOrder, getAccountInfo,
   getSymbolPrecision, adjustQuantity, adjustPrice,
 } from '../binance.js';
+import { checkRisk } from '../risk-control.js';
 import { recordTrade } from '../storage.js';
 import type { Strategy, AnalysisResult, StrategyResult } from './base.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -158,10 +159,18 @@ export const gridStrategy: Strategy = {
   },
 
   async execute(symbol: string, _result: AnalysisResult): Promise<StrategyResult[]> {
+    const upperSymbol = symbol.toUpperCase();
+
+    // 風控檢查
+    const riskCheck = checkRisk();
+    if (!riskCheck.allowed) {
+      console.log(`⛔ [${this.name}] 風控攔截：${riskCheck.reason}`);
+      return [{ action: 'HOLD', symbol: upperSymbol, strategy: this.name, reason: riskCheck.reason ?? '風控攔截', timestamp: Date.now() }];
+    }
+
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);
     const account = await getAccountInfo();
-    const upperSymbol = symbol.toUpperCase();
 
     // 取得精度資訊
     const precision = await getSymbolPrecision(upperSymbol);
@@ -195,6 +204,9 @@ export const gridStrategy: Strategy = {
 
       const existingPrices = new Set(openOrders.map((o) => o.price));
       let addedCount = 0;
+      let failedCount = 0;
+      let addedBuy = 0;
+      let addedSell = 0;
 
       for (const gridPrice of existingGrid.gridPrices) {
         if (existingPrices.has(gridPrice)) continue; // 已有此價位的單
@@ -204,24 +216,32 @@ export const gridStrategy: Strategy = {
           if (gridPriceNum < currentPrice) {
             await placeOrder(upperSymbol, 'BUY', 'LIMIT', existingGrid.quantityPerGrid, gridPrice);
             addedCount++;
+            addedBuy++;
             console.log(`   🟢 補買單 @ ${gridPrice}`);
           } else if (gridPriceNum > currentPrice) {
             await placeOrder(upperSymbol, 'SELL', 'LIMIT', existingGrid.quantityPerGrid, gridPrice);
             addedCount++;
+            addedSell++;
             console.log(`   🔴 補賣單 @ ${gridPrice}`);
           }
         } catch (err) {
+          failedCount++;
           const msg = err instanceof Error ? err.message : String(err);
           console.log(`   ⚠️ 補單失敗 @ ${gridPrice}: ${msg}`);
         }
       }
 
-      console.log(`\n✅ 補單完成！新增 ${addedCount} 筆掛單`);
+      // 判斷回傳 action
+      let replenishAction: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+      if (addedBuy > 0 && addedSell === 0) replenishAction = 'BUY';
+      else if (addedSell > 0 && addedBuy === 0) replenishAction = 'SELL';
+
+      console.log(`\n✅ 補單完成！成功 ${addedCount} 筆${failedCount > 0 ? `，失敗 ${failedCount} 筆` : ''}`);
       return [{
-        action: 'BUY' as const,
+        action: replenishAction,
         symbol: upperSymbol,
         strategy: this.name,
-        reason: `網格補單完成，新增 ${addedCount} 筆掛單`,
+        reason: `網格補單完成，成功 ${addedCount} 筆${failedCount > 0 ? `，失敗 ${failedCount} 筆` : ''}`,
         timestamp: Date.now(),
       }];
     }

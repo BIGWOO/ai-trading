@@ -9,7 +9,7 @@
 
 import {
   getKlines, getPrice, placeOrder, getAccountInfo,
-  calculateRSI, getSymbolPrecision, adjustQuantity,
+  calculateRSI, getSymbolPrecision, adjustQuantity, getAvgFillPrice,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
 import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
@@ -107,15 +107,19 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         return;
       }
 
-      console.log(`🟢 [${this.name}] 買入 ${symbol}: ${quantity} @ ${price}`);
+      console.log(`🟢 [${this.name}] 買入 ${symbol}: ${quantity} @ ~${price}`);
       const order = await placeOrder(symbol, 'BUY', 'MARKET', quantity, price);
 
-      // 記錄部位
+      // 使用實際成交數據
+      const actualPrice = getAvgFillPrice(order);
+      const actualQty = order.executedQty;
+
+      // 記錄部位（用實際成交數據）
       openPosition({
         strategy: this.name,
         symbol,
-        entryPrice: price,
-        quantity,
+        entryPrice: actualPrice,
+        quantity: actualQty,
         orderId: order.orderId,
       });
 
@@ -123,8 +127,8 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         timestamp: Date.now(),
         symbol,
         side: 'BUY',
-        price,
-        quantity,
+        price: actualPrice,
+        quantity: actualQty,
         strategy: this.name,
         orderId: order.orderId,
         reason: result.reason,
@@ -141,8 +145,12 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
 
       const quantity = position.quantity;
 
-      console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ${price}（完整平倉）`);
+      console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ~${price}（完整平倉）`);
       const order = await placeOrder(symbol, 'SELL', 'MARKET', quantity, price);
+
+      // 使用實際成交數據
+      const actualPrice = getAvgFillPrice(order);
+      const actualQty = order.executedQty;
 
       // 下單成功後才關閉本地部位
       closePosition(this.name, symbol);
@@ -151,8 +159,8 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         timestamp: Date.now(),
         symbol,
         side: 'SELL',
-        price,
-        quantity,
+        price: actualPrice,
+        quantity: actualQty,
         strategy: this.name,
         orderId: order.orderId,
         reason: result.reason,

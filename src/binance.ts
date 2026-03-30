@@ -1,6 +1,7 @@
 /**
  * Binance API 封裝模組
  * 支援 HMAC SHA256 簽名，可切換 testnet/mainnet
+ * 含延遲載入 API Key、URL 白名單、timeout/retry、Exchange Info 快取
  */
 
 import { createHmac } from 'node:crypto';
@@ -10,21 +11,73 @@ config();
 
 // ===== 設定 =====
 
-const API_KEY = process.env.BINANCE_API_KEY ?? '';
-const SECRET_KEY = process.env.BINANCE_SECRET_KEY ?? '';
+/** 允許的 BASE_URL 白名單 */
+const ALLOWED_BASE_URLS = [
+  'https://testnet.binance.vision',
+  'https://api.binance.com',
+];
+
 const BASE_URL = process.env.BINANCE_BASE_URL ?? 'https://testnet.binance.vision';
 const IS_TESTNET = process.env.BINANCE_TESTNET === 'true';
 
-if (!API_KEY || !SECRET_KEY) {
-  console.error('❌ 請在 .env 中設定 BINANCE_API_KEY 和 BINANCE_SECRET_KEY');
+// 啟動時驗證 BASE_URL
+if (!ALLOWED_BASE_URLS.includes(BASE_URL)) {
+  console.error(`❌ BASE_URL 不在白名單中：${BASE_URL}`);
+  console.error(`   允許的 URL：${ALLOWED_BASE_URLS.join(', ')}`);
   process.exit(1);
+}
+
+/** Mainnet 安全確認 */
+const LIVE_TRADING_CONFIRM = process.env.LIVE_TRADING_CONFIRM ?? '';
+const MAX_ORDER_USDT = parseFloat(process.env.MAX_ORDER_USDT ?? '100');
+
+/** 延遲載入 API Key — 只在需要簽名時才檢查 */
+function getApiKey(): string {
+  const key = process.env.BINANCE_API_KEY ?? '';
+  if (!key) {
+    throw new Error('❌ 請在 .env 中設定 BINANCE_API_KEY');
+  }
+  return key;
+}
+
+function getSecretKey(): string {
+  const key = process.env.BINANCE_SECRET_KEY ?? '';
+  if (!key) {
+    throw new Error('❌ 請在 .env 中設定 BINANCE_SECRET_KEY');
+  }
+  return key;
+}
+
+// ===== Mainnet 安全檢查 =====
+
+/** 檢查 mainnet 下單是否已確認 */
+function assertMainnetSafe(): void {
+  if (IS_TESTNET) return;
+  if (LIVE_TRADING_CONFIRM !== 'yes-i-know-what-i-am-doing') {
+    throw new Error(
+      '❌ 非測試網環境，但未設定 LIVE_TRADING_CONFIRM=yes-i-know-what-i-am-doing\n' +
+      '   如果你確定要在主網下單，請在 .env 中加入此設定',
+    );
+  }
+}
+
+/** 檢查主網下單金額限制 */
+function assertOrderSize(quantity: string, price: string): void {
+  if (IS_TESTNET) return;
+  const notional = parseFloat(quantity) * parseFloat(price);
+  if (notional > MAX_ORDER_USDT) {
+    throw new Error(
+      `❌ 單筆下單金額 ${notional.toFixed(2)} USDT 超過上限 ${MAX_ORDER_USDT} USDT\n` +
+      `   可在 .env 中調整 MAX_ORDER_USDT`,
+    );
+  }
 }
 
 // ===== 工具函式 =====
 
 /** 產生 HMAC SHA256 簽名 */
 function sign(queryString: string): string {
-  return createHmac('sha256', SECRET_KEY).update(queryString).digest('hex');
+  return createHmac('sha256', getSecretKey()).update(queryString).digest('hex');
 }
 
 /** 取得當前時間戳（毫秒） */
@@ -47,23 +100,75 @@ interface BinanceError {
   msg: string;
 }
 
-/** 發送公開 API 請求（不需簽名） */
+/** 帶 timeout 的 fetch */
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs: number = 10000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 判斷是否應該 retry */
+function shouldRetry(status: number): boolean {
+  return status === 429 || status === 418;
+}
+
+/** 安全解析 JSON 回應 */
+async function safeParseJson<T>(res: Response): Promise<T | BinanceError> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T | BinanceError;
+  } catch {
+    throw new Error(`❌ Binance API 回傳非 JSON 格式：${text.slice(0, 200)}`);
+  }
+}
+
+/** 發送公開 API 請求（不需簽名、不送 API Key） */
 async function publicRequest<T>(endpoint: string, params: Record<string, string | number | boolean> = {}): Promise<T> {
   const qs = toQueryString(params);
   const url = `${BASE_URL}${endpoint}${qs ? '?' + qs : ''}`;
 
-  const res = await fetch(url, {
-    headers: { 'X-MBX-APIKEY': API_KEY },
-  });
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url);
 
-  const data = await res.json() as T | BinanceError;
+      if (shouldRetry(res.status)) {
+        const wait = Math.pow(2, attempt) * 1000;
+        console.log(`⏳ API 限流 (${res.status})，${wait / 1000} 秒後重試...`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
 
-  if (!res.ok || (data as BinanceError).code) {
-    const err = data as BinanceError;
-    throw new Error(`❌ Binance API 錯誤 [${err.code}]: ${err.msg}`);
+      const data = await safeParseJson<T>(res);
+
+      if (!res.ok || (data as BinanceError).code) {
+        const err = data as BinanceError;
+        throw new Error(`❌ Binance API 錯誤 [${err.code}]: ${err.msg}`);
+      }
+
+      return data as T;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (lastError.name === 'AbortError') {
+        lastError = new Error('❌ Binance API 請求超時（10 秒）');
+      }
+      // 非限流錯誤不重試
+      if (attempt < 2 && lastError.message.includes('超時')) {
+        const wait = Math.pow(2, attempt) * 1000;
+        console.log(`⏳ 請求超時，${wait / 1000} 秒後重試...`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      if (!lastError.message.includes('限流') && !lastError.message.includes('超時')) {
+        throw lastError;
+      }
+    }
   }
-
-  return data as T;
+  throw lastError ?? new Error('❌ Binance API 請求失敗');
 }
 
 /** 發送需要簽名的私有 API 請求 */
@@ -72,6 +177,7 @@ async function signedRequest<T>(
   endpoint: string,
   params: Record<string, string | number | boolean> = {},
 ): Promise<T> {
+  const apiKey = getApiKey();
   const allParams = { ...params, timestamp: timestamp(), recvWindow: 10000 };
   const qs = toQueryString(allParams);
   const signature = sign(qs);
@@ -79,19 +185,70 @@ async function signedRequest<T>(
 
   const url = `${BASE_URL}${endpoint}?${fullQs}`;
 
-  const res = await fetch(url, {
-    method,
-    headers: { 'X-MBX-APIKEY': API_KEY },
-  });
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, {
+        method,
+        headers: { 'X-MBX-APIKEY': apiKey },
+      });
 
-  const data = await res.json() as T | BinanceError;
+      if (shouldRetry(res.status)) {
+        // POST /order 不重試，避免重複下單
+        if (method === 'POST' && endpoint.includes('/order')) {
+          const data = await safeParseJson<T>(res);
+          const err = data as BinanceError;
+          throw new Error(`❌ Binance API 限流 [${err.code}]: ${err.msg}（下單請求不自動重試）`);
+        }
+        const wait = Math.pow(2, attempt) * 1000;
+        console.log(`⏳ API 限流 (${res.status})，${wait / 1000} 秒後重試...`);
+        await new Promise((r) => setTimeout(r, wait));
+        // 重新簽名（timestamp 會變）
+        const newParams = { ...params, timestamp: timestamp(), recvWindow: 10000 };
+        const newQs = toQueryString(newParams);
+        const newSig = sign(newQs);
+        const newUrl = `${BASE_URL}${endpoint}?${newQs}&signature=${newSig}`;
+        const retryRes = await fetchWithTimeout(newUrl, {
+          method,
+          headers: { 'X-MBX-APIKEY': apiKey },
+        });
+        const retryData = await safeParseJson<T>(retryRes);
+        if (!retryRes.ok || (retryData as BinanceError).code) {
+          const retryErr = retryData as BinanceError;
+          throw new Error(`❌ Binance API 錯誤 [${retryErr.code}]: ${retryErr.msg}`);
+        }
+        return retryData as T;
+      }
 
-  if (!res.ok || (data as BinanceError).code) {
-    const err = data as BinanceError;
-    throw new Error(`❌ Binance API 錯誤 [${err.code}]: ${err.msg}`);
+      const data = await safeParseJson<T>(res);
+
+      if (!res.ok || (data as BinanceError).code) {
+        const err = data as BinanceError;
+        throw new Error(`❌ Binance API 錯誤 [${err.code}]: ${err.msg}`);
+      }
+
+      return data as T;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (lastError.name === 'AbortError') {
+        lastError = new Error('❌ Binance API 請求超時（10 秒）');
+      }
+      // 下單請求不重試
+      if (method === 'POST' && endpoint.includes('/order')) {
+        throw lastError;
+      }
+      if (attempt < 2 && lastError.message.includes('超時')) {
+        const wait = Math.pow(2, attempt) * 1000;
+        console.log(`⏳ 請求超時，${wait / 1000} 秒後重試...`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      if (!lastError.message.includes('限流') && !lastError.message.includes('超時')) {
+        throw lastError;
+      }
+    }
   }
-
-  return data as T;
+  throw lastError ?? new Error('❌ Binance API 請求失敗');
 }
 
 // ===== 型別定義 =====
@@ -161,6 +318,101 @@ export interface Trade {
   isMaker: boolean;
 }
 
+// ===== Exchange Info 快取（下單精度） =====
+
+interface SymbolFilter {
+  filterType: string;
+  stepSize?: string;
+  tickSize?: string;
+  minNotional?: string;
+  notional?: string;
+  minQty?: string;
+  maxQty?: string;
+  minPrice?: string;
+  maxPrice?: string;
+}
+
+interface SymbolInfo {
+  symbol: string;
+  filters: SymbolFilter[];
+  baseAssetPrecision: number;
+  quoteAssetPrecision: number;
+}
+
+interface ExchangeInfoResponse {
+  symbols: SymbolInfo[];
+}
+
+/** Exchange Info 快取 */
+const exchangeInfoCache = new Map<string, { info: SymbolInfo; cachedAt: number }>();
+const CACHE_TTL = 60 * 60 * 1000; // 1 小時
+
+/** 取得交易對的 Exchange Info */
+export async function getExchangeInfo(symbol: string): Promise<SymbolInfo> {
+  const upperSymbol = symbol.toUpperCase();
+  const cached = exchangeInfoCache.get(upperSymbol);
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL) {
+    return cached.info;
+  }
+
+  const data = await publicRequest<ExchangeInfoResponse>('/api/v3/exchangeInfo', { symbol: upperSymbol });
+  const info = data.symbols.find((s) => s.symbol === upperSymbol);
+  if (!info) {
+    throw new Error(`❌ 找不到交易對 ${upperSymbol} 的資訊`);
+  }
+
+  exchangeInfoCache.set(upperSymbol, { info, cachedAt: Date.now() });
+  return info;
+}
+
+/** 根據 stepSize 調整數量精度 */
+export function adjustQuantity(stepSize: string, qty: number): string {
+  const step = parseFloat(stepSize);
+  if (step === 0) return String(qty);
+  // 計算小數位數
+  const decimals = stepSize.indexOf('.') === -1 ? 0 : stepSize.replace(/0+$/, '').split('.')[1]?.length ?? 0;
+  const adjusted = Math.floor(qty / step) * step;
+  return adjusted.toFixed(decimals);
+}
+
+/** 根據 tickSize 調整價格精度 */
+export function adjustPrice(tickSize: string, price: number): string {
+  const tick = parseFloat(tickSize);
+  if (tick === 0) return String(price);
+  const decimals = tickSize.indexOf('.') === -1 ? 0 : tickSize.replace(/0+$/, '').split('.')[1]?.length ?? 0;
+  const adjusted = Math.floor(price / tick) * tick;
+  return adjusted.toFixed(decimals);
+}
+
+/** 取得交易對的精度參數 */
+export async function getSymbolPrecision(symbol: string): Promise<{
+  stepSize: string;
+  tickSize: string;
+  minNotional: number;
+  minQty: number;
+}> {
+  const info = await getExchangeInfo(symbol);
+  let stepSize = '0.00001';
+  let tickSize = '0.01';
+  let minNotional = 10;
+  let minQty = 0;
+
+  for (const f of info.filters) {
+    if (f.filterType === 'LOT_SIZE') {
+      stepSize = f.stepSize ?? stepSize;
+      minQty = parseFloat(f.minQty ?? '0');
+    } else if (f.filterType === 'PRICE_FILTER') {
+      tickSize = f.tickSize ?? tickSize;
+    } else if (f.filterType === 'MIN_NOTIONAL') {
+      minNotional = parseFloat(f.minNotional ?? '10');
+    } else if (f.filterType === 'NOTIONAL') {
+      minNotional = parseFloat(f.minNotional ?? '10');
+    }
+  }
+
+  return { stepSize, tickSize, minNotional, minQty };
+}
+
 // ===== 公開 API 函式 =====
 
 /** 查詢帳戶餘額 */
@@ -204,7 +456,7 @@ export async function getKlines(
   }));
 }
 
-/** 下單（支援 LIMIT 和 MARKET） */
+/** 下單（支援 LIMIT 和 MARKET），自動調整精度 */
 export async function placeOrder(
   symbol: string,
   side: 'BUY' | 'SELL',
@@ -212,18 +464,49 @@ export async function placeOrder(
   quantity: string,
   price?: string,
 ): Promise<OrderResponse> {
+  // Mainnet 安全檢查
+  assertMainnetSafe();
+
+  const upperSymbol = symbol.toUpperCase();
+
+  // 取得精度資訊並調整
+  const precision = await getSymbolPrecision(upperSymbol);
+  const adjustedQty = adjustQuantity(precision.stepSize, parseFloat(quantity));
+
+  if (parseFloat(adjustedQty) < precision.minQty) {
+    throw new Error(`❌ 下單數量 ${adjustedQty} 低於最小值 ${precision.minQty}`);
+  }
+
   const params: Record<string, string | number | boolean> = {
-    symbol: symbol.toUpperCase(),
+    symbol: upperSymbol,
     side,
     type,
-    quantity,
+    quantity: adjustedQty,
     newOrderRespType: 'FULL',
   };
 
   if (type === 'LIMIT') {
     if (!price) throw new Error('❌ LIMIT 訂單必須指定價格');
-    params.price = price;
+    const adjustedPrice = adjustPrice(precision.tickSize, parseFloat(price));
+    params.price = adjustedPrice;
     params.timeInForce = 'GTC';
+
+    // Mainnet 金額檢查
+    assertOrderSize(adjustedQty, adjustedPrice);
+  } else {
+    // MARKET 單用估計價格檢查金額
+    if (price) {
+      assertOrderSize(adjustedQty, price);
+    }
+  }
+
+  // 檢查 MIN_NOTIONAL
+  const estimatePrice = price ? parseFloat(price) : 0;
+  if (estimatePrice > 0) {
+    const notional = parseFloat(adjustedQty) * estimatePrice;
+    if (notional < precision.minNotional) {
+      throw new Error(`❌ 下單金額 ${notional.toFixed(2)} USDT 低於最低要求 ${precision.minNotional} USDT`);
+    }
   }
 
   return signedRequest<OrderResponse>('POST', '/api/v3/order', params);

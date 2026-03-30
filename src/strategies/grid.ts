@@ -228,19 +228,28 @@ export const gridStrategy: Strategy = {
     console.log(`   🔢 網格數: ${config.gridCount}`);
     console.log(`   📦 每格數量: ${config.quantityPerGrid}`);
 
-    // 如果交易所有掛單但本地沒 state（檔案損壞/遺失），詢問而非直接取消
+    // 如果交易所有掛單但本地沒 state，必須全部取消才能建新格
     if (openOrders.length > 0) {
-      console.log(`\n⚠️ 發現 ${openOrders.length} 筆既有掛單，但本地無網格狀態紀錄`);
-      console.log(`   🗑️ 取消現有掛單並建立新網格...`);
+      console.log(`\n⚠️ 發現 ${openOrders.length} 筆既有掛單，需先全部取消`);
+      let cancelFailed = 0;
       for (const order of openOrders) {
         try {
           await cancelOrder(upperSymbol, order.orderId);
+          console.log(`   🗑️ 已取消 ID:${order.orderId}`);
         } catch (err) {
+          cancelFailed++;
           const msg = err instanceof Error ? err.message : String(err);
-          console.log(`   ⚠️ 取消掛單失敗 ID:${order.orderId}: ${msg}`);
+          console.log(`   ❌ 取消失敗 ID:${order.orderId}: ${msg}`);
         }
       }
       deactivateGridState(upperSymbol);
+
+      // 如果有任何取消失敗，中止建新格（避免舊新重疊放大曝險）
+      if (cancelFailed > 0) {
+        console.log(`\n❌ ${cancelFailed} 筆掛單取消失敗，為避免重疊曝險，中止建立新網格`);
+        console.log(`   請手動到 Binance 確認並取消殘留掛單後重新執行`);
+        return;
+      }
     }
 
     // 計算每格價格

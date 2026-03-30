@@ -111,9 +111,23 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs: 
   }
 }
 
-/** 判斷是否應該 retry */
+/** 判斷是否應該 retry（含 5xx 伺服器錯誤） */
 function shouldRetry(status: number): boolean {
-  return status === 429 || status === 418;
+  return status === 429 || status === 418 || (status >= 500 && status < 600);
+}
+
+/** 判斷是否為可重試的網路錯誤 */
+function isRetryableNetworkError(err: unknown): boolean {
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    return msg.includes('fetch failed') ||
+      msg.includes('econnreset') ||
+      msg.includes('econnrefused') ||
+      msg.includes('etimedout') ||
+      msg.includes('socket hang up') ||
+      err.name === 'AbortError';
+  }
+  return false;
 }
 
 /** 安全解析 JSON 回應 */
@@ -156,16 +170,14 @@ async function publicRequest<T>(endpoint: string, params: Record<string, string 
       if (lastError.name === 'AbortError') {
         lastError = new Error('❌ Binance API 請求超時（10 秒）');
       }
-      // 非限流錯誤不重試
-      if (attempt < 2 && lastError.message.includes('超時')) {
+      // 可重試的網路/超時錯誤（含 5xx、連線重置等）
+      if (attempt < 2 && (isRetryableNetworkError(err) || lastError.message.includes('超時'))) {
         const wait = Math.pow(2, attempt) * 1000;
-        console.log(`⏳ 請求超時，${wait / 1000} 秒後重試...`);
+        console.log(`⏳ 網路錯誤，${wait / 1000} 秒後重試...`);
         await new Promise((r) => setTimeout(r, wait));
         continue;
       }
-      if (!lastError.message.includes('限流') && !lastError.message.includes('超時')) {
-        throw lastError;
-      }
+      throw lastError;
     }
   }
   throw lastError ?? new Error('❌ Binance API 請求失敗');
@@ -237,15 +249,13 @@ async function signedRequest<T>(
       if (method === 'POST' && endpoint.includes('/order')) {
         throw lastError;
       }
-      if (attempt < 2 && lastError.message.includes('超時')) {
+      if (attempt < 2 && (isRetryableNetworkError(err) || lastError.message.includes('超時'))) {
         const wait = Math.pow(2, attempt) * 1000;
-        console.log(`⏳ 請求超時，${wait / 1000} 秒後重試...`);
+        console.log(`⏳ 網路錯誤，${wait / 1000} 秒後重試...`);
         await new Promise((r) => setTimeout(r, wait));
         continue;
       }
-      if (!lastError.message.includes('限流') && !lastError.message.includes('超時')) {
-        throw lastError;
-      }
+      throw lastError;
     }
   }
   throw lastError ?? new Error('❌ Binance API 請求失敗');

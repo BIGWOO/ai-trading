@@ -5,6 +5,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { atomicWriteJson } from './utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,7 +51,7 @@ function readPositions(): Position[] {
 
 function writePositions(positions: Position[]): void {
   ensureDataDir();
-  writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2), 'utf-8');
+  atomicWriteJson(POSITIONS_FILE, positions);
 }
 
 // ===== 公開函式 =====

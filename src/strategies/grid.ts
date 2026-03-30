@@ -11,10 +11,10 @@ import {
   getPrice, placeOrder, getOpenOrders, cancelOrder, getAccountInfo,
   getSymbolPrecision, adjustQuantity, adjustPrice,
 } from '../binance.js';
-import { checkRisk } from '../risk-control.js';
 import { recordTrade } from '../storage.js';
 import type { Strategy, AnalysisResult, StrategyResult } from './base.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { atomicWriteJson } from '../utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -93,7 +93,7 @@ function writeGridState(state: GridState): void {
     (s) => !(s.symbol === state.symbol && s.active),
   );
   filtered.push(state);
-  writeFileSync(GRID_STATE_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
+  atomicWriteJson(GRID_STATE_FILE, filtered);
 }
 
 function deactivateGridState(symbol: string): void {
@@ -106,7 +106,7 @@ function deactivateGridState(symbol: string): void {
         s.active = false;
       }
     }
-    writeFileSync(GRID_STATE_FILE, JSON.stringify(states, null, 2), 'utf-8');
+    atomicWriteJson(GRID_STATE_FILE, states);
   } catch {
     // 忽略
   }
@@ -160,13 +160,6 @@ export const gridStrategy: Strategy = {
 
   async execute(symbol: string, _result: AnalysisResult): Promise<StrategyResult[]> {
     const upperSymbol = symbol.toUpperCase();
-
-    // 風控檢查
-    const riskCheck = checkRisk();
-    if (!riskCheck.allowed) {
-      console.log(`⛔ [${this.name}] 風控攔截：${riskCheck.reason}`);
-      return [{ action: 'HOLD', symbol: upperSymbol, strategy: this.name, reason: riskCheck.reason ?? '風控攔截', timestamp: Date.now() }];
-    }
 
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);

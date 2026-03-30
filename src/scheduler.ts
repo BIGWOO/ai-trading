@@ -6,6 +6,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { atomicWriteJson } from './utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { StrategyResult } from './strategies/base.js';
@@ -114,7 +115,7 @@ function readAutoTrades(): AutoTradeMap {
 
 function writeAutoTrades(data: AutoTradeMap): void {
   ensureDataDir();
-  writeFileSync(AUTO_TRADING_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  atomicWriteJson(AUTO_TRADING_FILE, data);
 }
 
 // ===== 公開函式 =====

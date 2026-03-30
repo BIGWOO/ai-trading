@@ -5,6 +5,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { atomicWriteJson } from './utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -83,7 +84,7 @@ function readTrades(): TradeRecord[] {
 
 function writeTrades(trades: TradeRecord[]): void {
   ensureDataDir();
-  writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2), 'utf-8');
+  atomicWriteJson(TRADES_FILE, trades);
 }
 
 // ===== 公開函式 =====

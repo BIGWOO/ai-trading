@@ -7,6 +7,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { atomicWriteJson } from './utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -106,22 +107,23 @@ function ensureDataDir(): void {
 export function readRiskConfig(): RiskConfig {
   ensureDataDir();
   if (!existsSync(CONFIG_FILE)) {
-    writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf-8');
+    atomicWriteJson(CONFIG_FILE, DEFAULT_CONFIG);
     return { ...DEFAULT_CONFIG };
   }
   try {
     const raw = readFileSync(CONFIG_FILE, 'utf-8');
     return { ...DEFAULT_CONFIG, ...JSON.parse(raw) as Partial<RiskConfig> };
-  } catch {
-    return { ...DEFAULT_CONFIG };
+  } catch (err) {
+    throw new Error(`❌ risk-config.json 損壞，拒絕交易。請修復或刪除後重新啟動。錯誤：${err}`);
   }
 }
 
 function readRiskState(): RiskState {
   ensureDataDir();
   if (!existsSync(STATE_FILE)) {
+    // 全新安裝，建立初始狀態是安全的
     const state = defaultState();
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+    writeRiskState(state);
     return state;
   }
   try {
@@ -136,14 +138,14 @@ function readRiskState(): RiskState {
       writeRiskState(state);
     }
     return state;
-  } catch {
-    return defaultState();
+  } catch (err) {
+    throw new Error(`❌ risk-state.json 損壞，拒絕交易。請修復或刪除後重新啟動。錯誤：${err}`);
   }
 }
 
 function writeRiskState(state: RiskState): void {
   ensureDataDir();
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+  atomicWriteJson(STATE_FILE, state);
 }
 
 // ===== 公開函式 =====
@@ -259,7 +261,7 @@ export function syncInitialCapital(actualBalance: number): void {
   const config = readRiskConfig();
   config.initialCapital = actualBalance;
   ensureDataDir();
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+  atomicWriteJson(CONFIG_FILE, config);
 
   // 如果 risk-state 的 equityPeak / currentEquity 還是預設值 10000，一起更新
   const state = readRiskState();

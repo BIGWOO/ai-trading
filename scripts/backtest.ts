@@ -9,6 +9,14 @@
  * - capital 追蹤完全正確
  */
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+import { config } from 'dotenv';
+config({ path: join(__dirname, '..', '.env') });
+
 import { getKlines, getEnvInfo } from '../src/binance.js';
 import { maCrossStrategy } from '../src/strategies/ma-cross.js';
 import { rsiStrategy } from '../src/strategies/rsi.js';

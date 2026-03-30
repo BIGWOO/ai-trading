@@ -5,6 +5,14 @@
  * 不需要 API Key 即可執行
  */
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+import { config } from 'dotenv';
+config({ path: join(__dirname, '..', '.env') });
+
 import { getPrice, getAllPrices, getEnvInfo } from '../src/binance.js';
 
 const DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT'];

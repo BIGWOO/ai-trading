@@ -3,6 +3,14 @@
  * 用法：npx tsx scripts/check-balance.ts
  */
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+import { config } from 'dotenv';
+config({ path: join(__dirname, '..', '.env') });
+
 import { getAccountInfo, getEnvInfo } from '../src/binance.js';
 
 async function main() {

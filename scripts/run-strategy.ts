@@ -6,6 +6,14 @@
  * --json：最後一行輸出 JSON 結果（方便程式解析）
  */
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+import { config } from 'dotenv';
+config({ path: join(__dirname, '..', '.env') });
+
 import { getEnvInfo } from '../src/binance.js';
 import { maCrossStrategy } from '../src/strategies/ma-cross.js';
 import { rsiStrategy } from '../src/strategies/rsi.js';

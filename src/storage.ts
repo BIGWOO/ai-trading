@@ -149,28 +149,31 @@ export async function getPerformance(filter?: TradeFilter): Promise<Performance>
   const buyCount = trades.filter((t) => t.side === 'BUY').length;
   const sellCount = trades.filter((t) => t.side === 'SELL').length;
 
-  // FIFO 按數量撮合
+  // FIFO 按數量撮合（按幣對分桶，避免跨幣種錯配）
   interface BuyEntry {
     price: number;
     remainingQty: number;
   }
 
-  const buyStack: BuyEntry[] = [];
+  const buyStacks = new Map<string, BuyEntry[]>();
   const pnlList: number[] = [];
 
   for (const trade of trades) {
     const qty = parseFloat(trade.quantity);
     const price = parseFloat(trade.price);
+    const sym = trade.symbol;
 
     if (trade.side === 'BUY') {
-      buyStack.push({ price, remainingQty: qty });
+      if (!buyStacks.has(sym)) buyStacks.set(sym, []);
+      buyStacks.get(sym)!.push({ price, remainingQty: qty });
     } else if (trade.side === 'SELL') {
-      // 從 FIFO 堆疊消耗數量
+      const stack = buyStacks.get(sym) ?? [];
+      // 從該幣對的 FIFO 堆疊消耗數量
       let remainingSellQty = qty;
       let sellPnL = 0;
 
-      while (remainingSellQty > 0 && buyStack.length > 0) {
-        const buyEntry = buyStack[0];
+      while (remainingSellQty > 0 && stack.length > 0) {
+        const buyEntry = stack[0];
         const matchQty = Math.min(remainingSellQty, buyEntry.remainingQty);
 
         sellPnL += matchQty * (price - buyEntry.price);
@@ -179,7 +182,7 @@ export async function getPerformance(filter?: TradeFilter): Promise<Performance>
 
         // 如果這筆買入已消耗完，移除
         if (buyEntry.remainingQty <= 1e-10) {
-          buyStack.shift();
+          stack.shift();
         }
       }
 

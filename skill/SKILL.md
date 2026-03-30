@@ -13,9 +13,13 @@ description: >
 
 ## 專案位置
 
-`/Users/bigwoo/repos/ai-trading`
+本 Skill 位於專案的 `skill/` 子目錄，專案根目錄為本檔案的上一層（`..`）。
 
-所有指令在此目錄下執行。
+執行指令前，先解析專案根目錄：
+```
+PROJECT_DIR = dirname(this SKILL.md) + "/.."
+```
+所有指令在 `PROJECT_DIR` 下執行。
 
 ## 指令對照
 
@@ -44,7 +48,7 @@ description: >
 ## 執行規則
 
 1. 所有指令加 `--json` flag（如有支援），方便解析結果
-2. 執行前先 `cd /Users/bigwoo/repos/ai-trading`
+2. 執行前先 `cd` 到 `PROJECT_DIR`（本 skill 的上一層目錄）
 3. 使用 `exec` 工具執行，設 `timeout: 30`（回測可設 60）
 4. 解析 JSON 輸出，轉換為人類友善的 Discord 訊息格式
 5. 價格和金額顯示千位分隔符號
@@ -56,7 +60,7 @@ description: >
 
 ```
 排程指令：npx tsx scripts/auto-trade.ts --json
-工作目錄：/Users/bigwoo/repos/ai-trading
+工作目錄：PROJECT_DIR（本 skill 的上一層目錄）
 建議間隔：5 分鐘
 ```
 

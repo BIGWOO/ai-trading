@@ -183,22 +183,22 @@ async function publicRequest<T>(endpoint: string, params: Record<string, string 
   throw lastError ?? new Error('❌ Binance API 請求失敗');
 }
 
-/** 發送需要簽名的私有 API 請求 */
+/** 發送需要簽名的私有 API 請求（每次 retry 都重新簽名） */
 async function signedRequest<T>(
   method: 'GET' | 'POST' | 'DELETE',
   endpoint: string,
   params: Record<string, string | number | boolean> = {},
 ): Promise<T> {
   const apiKey = getApiKey();
-  const allParams = { ...params, timestamp: timestamp(), recvWindow: 10000 };
-  const qs = toQueryString(allParams);
-  const signature = sign(qs);
-  const fullQs = `${qs}&signature=${signature}`;
-
-  const url = `${BASE_URL}${endpoint}?${fullQs}`;
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
+    // 每次都重新產生 timestamp 和簽名（避免 -1021 timestamp 過期）
+    const allParams = { ...params, timestamp: timestamp(), recvWindow: 10000 };
+    const qs = toQueryString(allParams);
+    const sig = sign(qs);
+    const url = `${BASE_URL}${endpoint}?${qs}&signature=${sig}`;
+
     try {
       const res = await fetchWithTimeout(url, {
         method,
@@ -213,23 +213,9 @@ async function signedRequest<T>(
           throw new Error(`❌ Binance API 限流 [${err.code}]: ${err.msg}（下單請求不自動重試）`);
         }
         const wait = Math.pow(2, attempt) * 1000;
-        console.log(`⏳ API 限流 (${res.status})，${wait / 1000} 秒後重試...`);
+        console.log(`⏳ API ${res.status}，${wait / 1000} 秒後重試...`);
         await new Promise((r) => setTimeout(r, wait));
-        // 重新簽名（timestamp 會變）
-        const newParams = { ...params, timestamp: timestamp(), recvWindow: 10000 };
-        const newQs = toQueryString(newParams);
-        const newSig = sign(newQs);
-        const newUrl = `${BASE_URL}${endpoint}?${newQs}&signature=${newSig}`;
-        const retryRes = await fetchWithTimeout(newUrl, {
-          method,
-          headers: { 'X-MBX-APIKEY': apiKey },
-        });
-        const retryData = await safeParseJson<T>(retryRes);
-        if (!retryRes.ok || (retryData as BinanceError).code) {
-          const retryErr = retryData as BinanceError;
-          throw new Error(`❌ Binance API 錯誤 [${retryErr.code}]: ${retryErr.msg}`);
-        }
-        return retryData as T;
+        continue; // 回到 loop 頂端重新簽名
       }
 
       const data = await safeParseJson<T>(res);
@@ -253,7 +239,7 @@ async function signedRequest<T>(
         const wait = Math.pow(2, attempt) * 1000;
         console.log(`⏳ 網路錯誤，${wait / 1000} 秒後重試...`);
         await new Promise((r) => setTimeout(r, wait));
-        continue;
+        continue; // 回到 loop 頂端重新簽名
       }
       throw lastError;
     }
@@ -290,6 +276,13 @@ export interface Kline {
   trades: number;
 }
 
+export interface OrderFill {
+  price: string;
+  qty: string;
+  commission: string;
+  commissionAsset: string;
+}
+
 export interface OrderResponse {
   symbol: string;
   orderId: number;
@@ -298,9 +291,32 @@ export interface OrderResponse {
   price: string;
   origQty: string;
   executedQty: string;
+  cummulativeQuoteQty: string;
   status: string;
   type: string;
   side: string;
+  fills?: OrderFill[];
+}
+
+/** 從 FULL 回應計算實際成交均價 */
+export function getAvgFillPrice(order: OrderResponse): string {
+  if (order.fills && order.fills.length > 0) {
+    let totalQty = 0;
+    let totalCost = 0;
+    for (const fill of order.fills) {
+      const qty = parseFloat(fill.qty);
+      totalQty += qty;
+      totalCost += qty * parseFloat(fill.price);
+    }
+    return totalQty > 0 ? (totalCost / totalQty).toFixed(8) : order.price;
+  }
+  // fallback：用 cummulativeQuoteQty / executedQty
+  const execQty = parseFloat(order.executedQty);
+  const quoteQty = parseFloat(order.cummulativeQuoteQty ?? '0');
+  if (execQty > 0 && quoteQty > 0) {
+    return (quoteQty / execQty).toFixed(8);
+  }
+  return order.price;
 }
 
 export interface OpenOrder {

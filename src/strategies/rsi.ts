@@ -10,6 +10,7 @@
 import {
   getKlines, getPrice, placeOrder, getAccountInfo,
   calculateRSI, getSymbolPrecision, adjustQuantity, getAvgFillPrice,
+  getNetQuantity, getTotalCommission, extractBaseAsset,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
 import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
@@ -130,14 +131,16 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
 
       // 使用實際成交數據
       const actualPrice = getAvgFillPrice(order);
-      const actualQty = order.executedQty;
+      // 扣除手續費後的淨數量（Binance 可能從基礎幣扣手續費）
+      const baseAsset = extractBaseAsset(symbol);
+      const netQty = getNetQuantity(order, baseAsset);
 
-      // 記錄部位（用實際成交數據）
+      // 記錄部位（用扣手續費後的淨數量）
       openPosition({
         strategy: this.name,
         symbol,
         entryPrice: actualPrice,
-        quantity: actualQty,
+        quantity: netQty,
         orderId: order.orderId,
       });
 
@@ -146,7 +149,7 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         symbol,
         side: 'BUY',
         price: actualPrice,
-        quantity: actualQty,
+        quantity: netQty,
         strategy: this.name,
         orderId: order.orderId,
         reason: result.reason,
@@ -157,7 +160,7 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         symbol,
         strategy: this.name,
         price: actualPrice,
-        quantity: actualQty,
+        quantity: netQty,
         orderId: order.orderId,
         reason: result.reason,
         timestamp: Date.now(),
@@ -178,6 +181,7 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         };
       }
 
+      // 使用 position 記錄的 quantity（已扣 BUY 手續費）
       const quantity = position.quantity;
 
       console.log(`🔴 [${this.name}] 賣出 ${symbol}: ${quantity} @ ~${price}（完整平倉）`);
@@ -187,8 +191,13 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       const actualPrice = getAvgFillPrice(order);
       const actualQty = order.executedQty;
 
-      // 計算 PnL
-      const pnl = (parseFloat(actualPrice) - parseFloat(position.entryPrice)) * parseFloat(actualQty);
+      // 計算 PnL（扣 SELL 側手續費）
+      const sellCommission = getTotalCommission(order);
+      const sellCommissionUsdt = sellCommission.asset === 'USDT'
+        ? sellCommission.amount
+        : parseFloat(actualPrice) * sellCommission.amount;
+      const grossPnl = (parseFloat(actualPrice) - parseFloat(position.entryPrice)) * parseFloat(actualQty);
+      const pnl = grossPnl - sellCommissionUsdt;
 
       // 下單成功後才關閉本地部位
       closePosition(this.name, symbol);

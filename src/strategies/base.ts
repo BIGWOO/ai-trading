@@ -18,6 +18,26 @@ export interface AnalysisResult {
   quantity?: string;
 }
 
+/** 策略執行結果（結構化輸出） */
+export interface StrategyResult {
+  /** 執行動作 */
+  action: 'BUY' | 'SELL' | 'HOLD';
+  /** 交易對 */
+  symbol: string;
+  /** 策略名稱 */
+  strategy: string;
+  /** 實際成交價（BUY/SELL 時） */
+  price?: string;
+  /** 實際成交量 */
+  quantity?: string;
+  /** 訂單 ID */
+  orderId?: number;
+  /** 執行原因 */
+  reason: string;
+  /** 時間戳（毫秒） */
+  timestamp: number;
+}
+
 export interface Strategy {
   /** 策略名稱 */
   name: string;
@@ -25,8 +45,8 @@ export interface Strategy {
   description: string;
   /** 分析行情並產生訊號 */
   analyze(symbol: string): Promise<AnalysisResult>;
-  /** 根據分析結果執行交易 */
-  execute(symbol: string, result: AnalysisResult): Promise<void>;
+  /** 根據分析結果執行交易，回傳結構化結果 */
+  execute(symbol: string, result: AnalysisResult): Promise<StrategyResult | StrategyResult[]>;
 }
 
 /** 回測用的 K 線分析（不需要即時 API） */

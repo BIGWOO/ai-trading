@@ -13,7 +13,7 @@ import {
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
 import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
-import type { Strategy, BacktestableStrategy, AnalysisResult } from './base.js';
+import type { Strategy, BacktestableStrategy, AnalysisResult, StrategyResult } from './base.js';
 
 const SHORT_PERIOD = 7;
 const LONG_PERIOD = 25;
@@ -88,10 +88,16 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
     };
   },
 
-  async execute(symbol: string, result: AnalysisResult): Promise<void> {
+  async execute(symbol: string, result: AnalysisResult): Promise<StrategyResult> {
     if (result.signal === 'HOLD') {
       console.log(`⏸️ [${this.name}] ${result.reason}`);
-      return;
+      return {
+        action: 'HOLD',
+        symbol,
+        strategy: this.name,
+        reason: result.reason,
+        timestamp: Date.now(),
+      };
     }
 
     const priceInfo = await getPrice(symbol);
@@ -101,7 +107,13 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
       // 檢查是否已有部位，避免重複加碼
       if (hasPosition(this.name, symbol)) {
         console.log(`⏸️ [${this.name}] 已有 ${symbol} 部位，跳過買入`);
-        return;
+        return {
+          action: 'HOLD',
+          symbol,
+          strategy: this.name,
+          reason: `已有 ${symbol} 部位，跳過買入`,
+          timestamp: Date.now(),
+        };
       }
 
       const account = await getAccountInfo();
@@ -116,7 +128,13 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
 
       if (parseFloat(quantity) <= 0) {
         console.log('⚠️ USDT 餘額不足，無法買入');
-        return;
+        return {
+          action: 'HOLD',
+          symbol,
+          strategy: this.name,
+          reason: 'USDT 餘額不足，無法買入',
+          timestamp: Date.now(),
+        };
       }
 
       console.log(`🟢 [${this.name}] 買入 ${symbol}: ${quantity} @ ~${price}`);
@@ -145,6 +163,17 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
         orderId: order.orderId,
         reason: result.reason,
       });
+
+      return {
+        action: 'BUY',
+        symbol,
+        strategy: this.name,
+        price: actualPrice,
+        quantity: actualQty,
+        orderId: order.orderId,
+        reason: result.reason,
+        timestamp: Date.now(),
+      };
     }
 
     if (result.signal === 'SELL') {
@@ -152,7 +181,13 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
       const position = getPosition(this.name, symbol);
       if (!position) {
         console.log(`⏸️ [${this.name}] 沒有 ${symbol} 部位，跳過賣出`);
-        return;
+        return {
+          action: 'HOLD',
+          symbol,
+          strategy: this.name,
+          reason: `沒有 ${symbol} 部位，跳過賣出`,
+          timestamp: Date.now(),
+        };
       }
 
       const quantity = position.quantity;
@@ -177,6 +212,26 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
         orderId: order.orderId,
         reason: result.reason,
       });
+
+      return {
+        action: 'SELL',
+        symbol,
+        strategy: this.name,
+        price: actualPrice,
+        quantity: actualQty,
+        orderId: order.orderId,
+        reason: result.reason,
+        timestamp: Date.now(),
+      };
     }
+
+    // fallback（理論上不會到這裡）
+    return {
+      action: 'HOLD',
+      symbol,
+      strategy: this.name,
+      reason: result.reason,
+      timestamp: Date.now(),
+    };
   },
 };

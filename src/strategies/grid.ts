@@ -12,7 +12,7 @@ import {
   getSymbolPrecision, adjustQuantity, adjustPrice,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
-import type { Strategy, AnalysisResult } from './base.js';
+import type { Strategy, AnalysisResult, StrategyResult } from './base.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -157,7 +157,7 @@ export const gridStrategy: Strategy = {
     };
   },
 
-  async execute(symbol: string, _result: AnalysisResult): Promise<void> {
+  async execute(symbol: string, _result: AnalysisResult): Promise<StrategyResult[]> {
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);
     const account = await getAccountInfo();
@@ -175,7 +175,13 @@ export const gridStrategy: Strategy = {
 
     if (parseFloat(quantityPerGrid) <= 0) {
       console.log('⚠️ USDT 餘額不足，無法建立網格');
-      return;
+      return [{
+        action: 'HOLD',
+        symbol: upperSymbol,
+        strategy: this.name,
+        reason: 'USDT 餘額不足，無法建立網格',
+        timestamp: Date.now(),
+      }];
     }
 
     // 檢查是否有既有活躍網格
@@ -211,7 +217,13 @@ export const gridStrategy: Strategy = {
       }
 
       console.log(`\n✅ 補單完成！新增 ${addedCount} 筆掛單`);
-      return;
+      return [{
+        action: 'BUY' as const,
+        symbol: upperSymbol,
+        strategy: this.name,
+        reason: `網格補單完成，新增 ${addedCount} 筆掛單`,
+        timestamp: Date.now(),
+      }];
     }
 
     // 新建模式
@@ -248,7 +260,13 @@ export const gridStrategy: Strategy = {
       if (cancelFailed > 0) {
         console.log(`\n❌ ${cancelFailed} 筆掛單取消失敗，為避免重疊曝險，中止建立新網格`);
         console.log(`   請手動到 Binance 確認並取消殘留掛單後重新執行`);
-        return;
+        return [{
+          action: 'HOLD',
+          symbol: upperSymbol,
+          strategy: this.name,
+          reason: `${cancelFailed} 筆掛單取消失敗，中止建立新網格`,
+          timestamp: Date.now(),
+        }];
       }
     }
 
@@ -296,5 +314,13 @@ export const gridStrategy: Strategy = {
 
     // 網格掛單不寫入 trades.json（掛單 ≠ 成交，避免污染績效計算）
     // 實際成交會由 Binance 端追蹤，未來可透過 getTradeHistory 同步
+
+    return [{
+      action: 'BUY',
+      symbol: upperSymbol,
+      strategy: this.name,
+      reason: `網格建立完成！買單 ${buyCount} 筆 / 賣單 ${sellCount} 筆`,
+      timestamp: Date.now(),
+    }];
   },
 };

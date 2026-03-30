@@ -3,8 +3,8 @@
  * 使用 temp-file + rename 確保 JSON 狀態檔不會因 crash 而損壞
  */
 
-import { writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { writeFileSync, renameSync, mkdirSync, existsSync, readdirSync, unlinkSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /**
@@ -18,4 +18,25 @@ export function atomicWriteJson(filePath: string, data: unknown): void {
   const tmpPath = `${filePath}.${randomUUID().slice(0, 8)}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
   renameSync(tmpPath, filePath);
+}
+
+/**
+ * 清理指定目錄中的 .tmp 殘留檔案
+ * 在啟動時呼叫，清除上次 crash 留下的暫存檔
+ */
+export function cleanupTmpFiles(dir: string): number {
+  if (!existsSync(dir)) return 0;
+  let cleaned = 0;
+  try {
+    const files = readdirSync(dir);
+    for (const file of files) {
+      if (file.endsWith('.tmp')) {
+        try {
+          unlinkSync(join(dir, file));
+          cleaned++;
+        } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return cleaned;
 }

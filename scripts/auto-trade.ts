@@ -21,6 +21,7 @@ config({ path: join(__dirname, '..', '.env') });
 
 import { openSync, readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, closeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { cleanupTmpFiles } from '../src/utils/atomic-write.js';
 import { getEnvInfo, getAccountInfo } from '../src/binance.js';
 import { maCrossStrategy } from '../src/strategies/ma-cross.js';
 import { rsiStrategy } from '../src/strategies/rsi.js';
@@ -153,6 +154,12 @@ async function main() {
       process.exit(0);
     }
 
+    // 啟動時清理可能的 .tmp 殘留檔案
+    const tmpCleaned = cleanupTmpFiles(DATA_DIR);
+    if (tmpCleaned > 0) {
+      console.log(`🧹 已清理 ${tmpCleaned} 個殘留 .tmp 檔案`);
+    }
+
     const env = getEnvInfo();
 
     console.log('');
@@ -229,11 +236,9 @@ async function main() {
         console.log(`  📊 分析 + 風控檢查中...`);
         const strategyResult = await executeWithRisk({ strategy, symbol: entry.symbol });
 
-        // 檢查是否被風控攔截
+        // 檢查是否被風控攔截（用 flag 判斷，不靠字串比對）
         const resultArray = Array.isArray(strategyResult) ? strategyResult : [strategyResult];
-        const isRiskBlocked = resultArray.length === 1 &&
-          resultArray[0].action === 'HOLD' &&
-          (resultArray[0].reason?.includes('風控攔截') ?? false);
+        const isRiskBlocked = resultArray.some((r) => r.riskBlocked === true);
 
         // 更新自動交易狀態
         updateAutoTradeResult(key, strategyResult);

@@ -26,6 +26,7 @@ export async function executeWithRisk(options: ExecuteOptions): Promise<Strategy
         strategy: strategy.name,
         reason: risk.reason ?? '風控攔截',
         timestamp: Date.now(),
+        riskBlocked: true,
       };
     }
   }

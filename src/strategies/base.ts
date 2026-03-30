@@ -38,6 +38,8 @@ export interface StrategyResult {
   timestamp: number;
   /** 損益（SELL 時計算） */
   pnl?: number;
+  /** 是否被風控攔截 */
+  riskBlocked?: boolean;
 }
 
 export interface Strategy {

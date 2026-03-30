@@ -228,11 +228,17 @@ export const gridStrategy: Strategy = {
     console.log(`   🔢 網格數: ${config.gridCount}`);
     console.log(`   📦 每格數量: ${config.quantityPerGrid}`);
 
-    // 先取消所有現有掛單
+    // 如果交易所有掛單但本地沒 state（檔案損壞/遺失），詢問而非直接取消
     if (openOrders.length > 0) {
-      console.log(`\n🗑️ 取消 ${openOrders.length} 筆現有掛單...`);
+      console.log(`\n⚠️ 發現 ${openOrders.length} 筆既有掛單，但本地無網格狀態紀錄`);
+      console.log(`   🗑️ 取消現有掛單並建立新網格...`);
       for (const order of openOrders) {
-        await cancelOrder(upperSymbol, order.orderId);
+        try {
+          await cancelOrder(upperSymbol, order.orderId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(`   ⚠️ 取消掛單失敗 ID:${order.orderId}: ${msg}`);
+        }
       }
       deactivateGridState(upperSymbol);
     }
@@ -279,18 +285,7 @@ export const gridStrategy: Strategy = {
 
     console.log(`\n✅ 網格建立完成！買單 ${buyCount} 筆 / 賣單 ${sellCount} 筆`);
 
-    // 只在有實際掛單時記錄（不寫 quantity=0 的假記錄）
-    if (buyCount + sellCount > 0) {
-      await recordTrade({
-        timestamp: Date.now(),
-        symbol: upperSymbol,
-        side: 'BUY',
-        price: String(currentPrice),
-        quantity: String(buyCount + sellCount), // 掛單數量
-        strategy: this.name,
-        orderId: 0,
-        reason: `建立網格：${config.lowerPrice.toFixed(2)}~${config.upperPrice.toFixed(2)}，買${buyCount}/賣${sellCount}`,
-      });
-    }
+    // 網格掛單不寫入 trades.json（掛單 ≠ 成交，避免污染績效計算）
+    // 實際成交會由 Binance 端追蹤，未來可透過 getTradeHistory 同步
   },
 };

@@ -36,6 +36,7 @@ import {
   enableAutoTrade, disableAutoTrade, getAutoTradeStatus,
 } from './scheduler.js';
 import type { Strategy, BacktestableStrategy } from './strategies/base.js';
+import { executeWithRisk } from './trade-executor.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -121,14 +122,8 @@ async function handleStrategy(name: string, symbol: string) {
   }
 
   console.log(`\n🤖 執行 ${strategy.name}（${symbol}）...`);
-  const result = await strategy.analyze(symbol);
-  console.log(`\n${result.reason}`);
-  console.log(`\n📍 訊號：${result.signal} | 強度：${(result.strength * 100).toFixed(1)}%`);
-
-  if (result.signal !== 'HOLD') {
-    console.log('\n⚡ 執行交易...');
-    await strategy.execute(symbol, result);
-  }
+  // 透過風控包裝器執行（分析 + 風控 + 交易）
+  await executeWithRisk({ strategy, symbol });
   console.log('\n✅ 完成！\n');
 }
 

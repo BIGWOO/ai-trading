@@ -19,14 +19,16 @@ const __dirname = dirname(__filename);
 import { config } from 'dotenv';
 config({ path: join(__dirname, '..', '.env') });
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
+import { openSync, readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, closeSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { getEnvInfo, getAccountInfo } from '../src/binance.js';
 import { maCrossStrategy } from '../src/strategies/ma-cross.js';
 import { rsiStrategy } from '../src/strategies/rsi.js';
 import { gridStrategy } from '../src/strategies/grid.js';
 import type { Strategy, StrategyResult } from '../src/strategies/base.js';
 import { getAutoTrades, isDue, updateAutoTradeResult } from '../src/scheduler.js';
-import { checkRisk, recordTradeForRisk, syncInitialCapital } from '../src/risk-control.js';
+import { syncInitialCapital } from '../src/risk-control.js';
+import { executeWithRisk } from '../src/trade-executor.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -43,7 +45,11 @@ const LOCK_MAX_AGE_MS = 30 * 60 * 1000; // 30 分鐘
 interface LockFileContent {
   pid: number;
   startedAt: number;
+  token: string;
 }
+
+/** 本次執行的唯一 token，用於 releaseLock 驗證 ownership */
+const lockToken = randomUUID();
 
 function ensureDataDir(): void {
   if (!existsSync(DATA_DIR)) {
@@ -60,44 +66,56 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+/** 嘗試用 O_WRONLY | O_CREAT | O_EXCL (wx) 原子建立 lock 檔 */
+function tryCreateLock(lockData: string): boolean {
+  try {
+    const fd = openSync(LOCK_FILE, 'wx');
+    writeFileSync(fd, lockData, 'utf-8');
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function acquireLock(): boolean {
   ensureDataDir();
 
-  if (existsSync(LOCK_FILE)) {
-    try {
-      const raw = readFileSync(LOCK_FILE, 'utf-8');
-      const lock = JSON.parse(raw) as LockFileContent;
+  const lockData = JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: lockToken });
 
-      const isAlive = isPidAlive(lock.pid);
-      const isExpired = Date.now() - lock.startedAt > LOCK_MAX_AGE_MS;
+  // 嘗試原子建檔
+  if (tryCreateLock(lockData)) return true;
 
-      if (isAlive && !isExpired) {
-        // PID 還活著且未超時 → 有另一個實例在跑
-        console.log(`⚠️ 另一個 auto-trade 正在執行中（PID: ${lock.pid}），跳過本次執行`);
-        return false;
-      }
+  // Lock 已存在，檢查是否為 orphan
+  try {
+    const existing = JSON.parse(readFileSync(LOCK_FILE, 'utf-8')) as LockFileContent;
+    const isAlive = isPidAlive(existing.pid);
+    const isStale = Date.now() - existing.startedAt > LOCK_MAX_AGE_MS;
 
-      // PID 已死或超過 30 分鐘 → orphan lock，清除並繼續
-      console.log(`🔓 清除過期 lock（PID: ${lock.pid}, 啟動於 ${new Date(lock.startedAt).toLocaleString('zh-TW')}）`);
-      unlinkSync(LOCK_FILE);
-    } catch {
-      // lock file 損壞，刪除並繼續
-      try { unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+    if (isAlive && !isStale) {
+      console.log(`⚠️ 另一個 auto-trade 正在執行中（PID: ${existing.pid}），跳過本次執行`);
+      return false;
     }
-  }
 
-  // 建立 lock file
-  const lockContent: LockFileContent = {
-    pid: process.pid,
-    startedAt: Date.now(),
-  };
-  writeFileSync(LOCK_FILE, JSON.stringify(lockContent, null, 2), 'utf-8');
-  return true;
+    // Orphan lock：PID 已死或超時
+    console.log(`🔓 清除過期 lock（PID: ${existing.pid}, 啟動於 ${new Date(existing.startedAt).toLocaleString('zh-TW')}）`);
+    unlinkSync(LOCK_FILE);
+
+    // 重試一次原子建檔
+    return tryCreateLock(lockData);
+  } catch {
+    // Lock 檔損壞，嘗試刪除重建
+    try { unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+    return tryCreateLock(lockData);
+  }
 }
 
 function releaseLock(): void {
   try {
-    if (existsSync(LOCK_FILE)) {
+    const content = readFileSync(LOCK_FILE, 'utf-8');
+    const data = JSON.parse(content) as LockFileContent;
+    // 只刪除自己建立的 lock（驗證 token ownership）
+    if (data.token === lockToken) {
       unlinkSync(LOCK_FILE);
     }
   } catch {
@@ -192,20 +210,6 @@ async function main() {
         continue;
       }
 
-      // 風控檢查
-      const riskCheck = checkRisk();
-      if (!riskCheck.allowed) {
-        console.log(`  ${riskCheck.reason}`);
-        results.push({
-          key,
-          strategy: entry.strategy,
-          symbol: entry.symbol,
-          status: 'risk-blocked',
-          reason: riskCheck.reason,
-        });
-        continue;
-      }
-
       // 取得策略
       const strategy = STRATEGIES[entry.strategy];
       if (!strategy) {
@@ -220,47 +224,39 @@ async function main() {
         continue;
       }
 
-      // 執行策略
+      // 透過風控包裝器執行（風控 + 分析 + 交易 + 風控記錄）
       try {
-        console.log(`  📊 分析中...`);
-        const analysis = await strategy.analyze(entry.symbol);
-        console.log(`  ${analysis.reason}`);
-        console.log(`  📍 訊號：${analysis.signal} | 強度：${(analysis.strength * 100).toFixed(1)}%`);
+        console.log(`  📊 分析 + 風控檢查中...`);
+        const strategyResult = await executeWithRisk({ strategy, symbol: entry.symbol });
 
-        let strategyResult: StrategyResult | StrategyResult[];
-
-        if (analysis.signal !== 'HOLD') {
-          console.log(`  ⚡ 執行交易...`);
-          strategyResult = await strategy.execute(entry.symbol, analysis);
-        } else {
-          strategyResult = {
-            action: 'HOLD',
-            symbol: entry.symbol,
-            strategy: strategy.name,
-            reason: analysis.reason,
-            timestamp: Date.now(),
-          };
-        }
+        // 檢查是否被風控攔截
+        const resultArray = Array.isArray(strategyResult) ? strategyResult : [strategyResult];
+        const isRiskBlocked = resultArray.length === 1 &&
+          resultArray[0].action === 'HOLD' &&
+          (resultArray[0].reason?.includes('風控攔截') ?? false);
 
         // 更新自動交易狀態
         updateAutoTradeResult(key, strategyResult);
 
-        // 如果有實際交易（BUY/SELL），記錄到風控
-        const resultArray = Array.isArray(strategyResult) ? strategyResult : [strategyResult];
-        for (const r of resultArray) {
-          if (r.action !== 'HOLD') {
-            recordTradeForRisk({ pnl: r.pnl ?? 0, timestamp: r.timestamp });
-          }
+        if (isRiskBlocked) {
+          console.log(`  ${resultArray[0].reason}`);
+          results.push({
+            key,
+            strategy: entry.strategy,
+            symbol: entry.symbol,
+            status: 'risk-blocked',
+            reason: resultArray[0].reason,
+          });
+        } else {
+          console.log(`  ✅ 完成`);
+          results.push({
+            key,
+            strategy: entry.strategy,
+            symbol: entry.symbol,
+            status: 'executed',
+            result: strategyResult,
+          });
         }
-
-        console.log(`  ✅ 完成`);
-        results.push({
-          key,
-          strategy: entry.strategy,
-          symbol: entry.symbol,
-          status: 'executed',
-          result: strategyResult,
-        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.log(`  ❌ 錯誤：${msg}`);

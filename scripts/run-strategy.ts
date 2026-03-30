@@ -19,6 +19,7 @@ import { maCrossStrategy } from '../src/strategies/ma-cross.js';
 import { rsiStrategy } from '../src/strategies/rsi.js';
 import { gridStrategy } from '../src/strategies/grid.js';
 import type { Strategy, StrategyResult } from '../src/strategies/base.js';
+import { executeWithRisk } from '../src/trade-executor.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -63,26 +64,9 @@ async function main() {
   console.log('');
 
   try {
-    // 分析
-    console.log('📊 分析中...');
-    const result = await strategy.analyze(symbol);
-    console.log(`\n${result.reason}`);
-    console.log(`\n📍 訊號：${result.signal} | 強度：${(result.strength * 100).toFixed(1)}%`);
-
-    let strategyResult: StrategyResult | StrategyResult[];
-
-    if (result.signal !== 'HOLD') {
-      console.log('\n⚡ 執行交易...');
-      strategyResult = await strategy.execute(symbol, result);
-    } else {
-      strategyResult = {
-        action: 'HOLD',
-        symbol,
-        strategy: strategy.name,
-        reason: result.reason,
-        timestamp: Date.now(),
-      };
-    }
+    // 透過風控包裝器執行（分析 + 風控 + 交易）
+    console.log('📊 分析 + 風控檢查中...');
+    const strategyResult = await executeWithRisk({ strategy, symbol });
 
     console.log('\n✅ 策略執行完成！');
     console.log('');

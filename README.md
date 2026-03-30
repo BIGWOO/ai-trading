@@ -13,7 +13,7 @@
 內建多種交易策略、四層風控保護、歷史回測，以及 AI 代理人整合能力。<br>
 **從零到自動交易，只需要 5 分鐘。**
 
-[快速開始](#-快速開始) · [交易策略](#-交易策略) · [自動交易](#-自動交易) · [風控系統](#-風控系統) · [回測](#-歷史回測) · [架構](#-專案架構)
+[AI 一鍵安裝](#-用-ai-幫你裝好一切推薦) · [手動安裝](#-快速開始) · [交易策略](#-交易策略) · [自動交易](#-自動交易) · [風控系統](#-風控系統) · [回測](#-歷史回測)
 
 </div>
 
@@ -28,6 +28,41 @@
 - 🤖 **AI 代理整合** — 搭配 [OpenClaw](https://github.com/openclaw/openclaw) 實現 Discord 指令操作
 - 📈 **歷史回測** — 用真實 K 線數據驗證策略績效
 - 🏗️ **零依賴架構** — 僅使用 Node.js 原生 `crypto`、`fetch`，無第三方 HTTP 庫
+
+---
+
+## 🤖 用 AI 幫你裝好一切（推薦）
+
+> 有 [OpenClaw](https://github.com/openclaw/openclaw)？把下面這段貼給你的 AI agent，它會自動搞定所有設定。
+> 你只需要提供一組 [Binance Testnet](https://testnet.binance.vision/) API Key。
+
+**📋 複製這段 prompt 貼給 Agent：**
+
+```
+幫我安裝 ai-trading skill。步驟：
+
+1. Clone 專案：git clone https://github.com/BIGWOO/ai-trading.git ~/repos/ai-trading
+2. 安裝依賴：cd ~/repos/ai-trading && npm install
+3. 建立 .env：cp .env.example .env
+4. 建立 skill symlink：ln -sf ~/repos/ai-trading ~/.openclaw/workspace/skills/ai-trading
+5. 請我提供 Binance Testnet API Key（從 https://testnet.binance.vision/ 取得）
+6. 把我提供的 API Key 填入 .env 的 BINANCE_API_KEY 和 BINANCE_SECRET_KEY
+7. 驗證連線：執行 npx tsx scripts/check-balance.ts 確認能看到餘額
+8. 驗證策略：執行 npx tsx scripts/run-strategy.ts ma-cross BTCUSDT 確認策略正常
+9. 完成後告訴我怎麼用（查價格、跑策略、回測、自動交易）
+```
+
+安裝完成後直接用自然語言操作：
+
+- 「查一下 BTC 價格」→ 即時行情
+- 「用 RSI 策略分析 ETHUSDT」→ 執行策略
+- 「回測 MA Cross 4 小時 200 根」→ 歷史回測
+- 「啟用自動交易 ma-cross BTCUSDT 每小時」→ 定時策略
+- 「看風控狀態」→ 四層風控儀表板
+
+> 💡 沒有 OpenClaw？往下看[手動安裝](#-快速開始)。
+
+---
 
 ## 📦 環境需求
 
@@ -307,43 +342,6 @@ ai-trading/
          ▼
   Binance API（HMAC 簽名）
 ```
-
----
-
-## 🤖 AI 代理整合（OpenClaw 一鍵安裝）
-
-本專案內建 [OpenClaw](https://github.com/openclaw/openclaw) Skill，安裝後你可以在 Discord 中用自然語言操作交易系統。
-
-### 一鍵安裝
-
-把下面這段 prompt 貼給你的 OpenClaw agent，它會自動完成所有設定：
-
-> **📋 複製貼上這段 prompt：**
-
-```
-幫我安裝 ai-trading skill。步驟：
-
-1. Clone 專案：git clone https://github.com/BIGWOO/ai-trading.git ~/repos/ai-trading
-2. 安裝依賴：cd ~/repos/ai-trading && npm install
-3. 建立 .env：cp .env.example .env
-4. 建立 skill symlink：ln -sf ~/repos/ai-trading ~/.openclaw/workspace/skills/ai-trading
-5. 請我提供 Binance Testnet API Key（從 https://testnet.binance.vision/ 取得）
-6. 把我提供的 API Key 填入 .env 的 BINANCE_API_KEY 和 BINANCE_SECRET_KEY
-7. 驗證連線：執行 npx tsx scripts/check-balance.ts 確認能看到餘額
-8. 驗證策略：執行 npx tsx scripts/run-strategy.ts ma-cross BTCUSDT 確認策略正常
-9. 完成後告訴我怎麼用（查價格、跑策略、回測、自動交易）
-```
-
-Agent 會一步步執行，中間只會停下來問你要 API Key。
-
-### 安裝完成後你可以
-
-- 「查一下 BTC 價格」→ 即時行情
-- 「用 RSI 策略分析 ETHUSDT」→ 執行策略
-- 「回測 MA Cross 4 小時 200 根」→ 歷史回測
-- 「啟用自動交易 ma-cross BTCUSDT 每小時」→ 定時策略
-- 「看風控狀態」→ 四層風控儀表板
-- 「看績效」→ 交易績效統計
 
 ---
 

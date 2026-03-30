@@ -3,13 +3,15 @@
  * 用法：npx tsx src/index.ts <命令>
  *
  * 命令：
- *   balance    — 查看帳戶餘額
- *   price      — 查看即時行情
- *   strategy   — 執行策略
- *   backtest   — 回測策略
- *   orders     — 查看未成交訂單
- *   trades     — 查看交易記錄
- *   performance — 查看績效
+ *   balance      — 查看帳戶餘額
+ *   price        — 查看即時行情
+ *   strategy     — 執行策略
+ *   backtest     — 回測策略
+ *   orders       — 查看未成交訂單
+ *   trades       — 查看交易記錄
+ *   performance  — 查看績效
+ *   auto         — 自動交易管理
+ *   risk         — 風控管理
  */
 
 import { config } from 'dotenv';
@@ -24,6 +26,10 @@ import { rsiStrategy } from './strategies/rsi.js';
 import { gridStrategy } from './strategies/grid.js';
 import { getTrades, getPerformance } from './storage.js';
 import { getKlines } from './binance.js';
+import { getRiskStatus, resetDailyRisk } from './risk-control.js';
+import {
+  enableAutoTrade, disableAutoTrade, getAutoTradeStatus,
+} from './scheduler.js';
 import type { Strategy, BacktestableStrategy } from './strategies/base.js';
 
 const STRATEGIES: Record<string, Strategy> = {
@@ -48,6 +54,11 @@ function showHelp() {
   console.log('    history <幣對>       查看成交歷史');
   console.log('    trades               查看本地交易記錄');
   console.log('    performance          查看績效統計');
+  console.log('    auto                 列出自動交易狀態');
+  console.log('    auto enable <策略> <幣對> <間隔>  啟用自動交易');
+  console.log('    auto disable <策略> <幣對>       停用自動交易');
+  console.log('    risk                 查看風控狀態');
+  console.log('    risk reset           重置當日風控');
   console.log('');
   console.log('  可用策略：');
   for (const [key, strategy] of Object.entries(STRATEGIES)) {
@@ -184,6 +195,99 @@ async function handlePerformance() {
   console.log('');
 }
 
+async function handleAuto(subcommand?: string, arg1?: string, arg2?: string, arg3?: string) {
+  if (!subcommand || subcommand === 'list' || subcommand === 'status') {
+    // 列出自動交易狀態
+    const status = getAutoTradeStatus();
+
+    console.log('\n🤖 自動交易狀態：');
+    console.log('═══════════════════════════════════════');
+    console.log(`  📋 總數：${status.total}  |  啟用：${status.enabled}  |  停用：${status.disabled}`);
+
+    if (status.entries.length === 0) {
+      console.log('  📭 尚未設定任何自動交易');
+    } else {
+      console.log('');
+      for (const entry of status.entries) {
+        const icon = entry.enabled ? '🟢' : '⚪';
+        const lastRun = entry.lastRun ?? '未執行';
+        console.log(`  ${icon} ${entry.key}`);
+        console.log(`     間隔: ${entry.interval} | 上次: ${lastRun} | 執行: ${entry.totalRuns} 次 | 錯誤: ${entry.errors}`);
+      }
+    }
+    console.log('');
+    return;
+  }
+
+  if (subcommand === 'enable') {
+    if (!arg1 || !arg2 || !arg3) {
+      console.log('❌ 用法：auto enable <策略> <幣對> <間隔>');
+      console.log('   範例：auto enable ma-cross BTCUSDT 1h');
+      return;
+    }
+    const strategyName = arg1;
+    if (!STRATEGIES[strategyName]) {
+      console.log(`❌ 未知策略：${strategyName}`);
+      console.log(`   可用策略：${Object.keys(STRATEGIES).join(', ')}`);
+      return;
+    }
+    try {
+      const entry = enableAutoTrade(strategyName, arg2, arg3);
+      console.log(`\n✅ 已啟用自動交易：${strategyName}:${entry.symbol}`);
+      console.log(`   間隔：${entry.interval}`);
+      console.log('');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`❌ ${msg}`);
+    }
+    return;
+  }
+
+  if (subcommand === 'disable') {
+    if (!arg1 || !arg2) {
+      console.log('❌ 用法：auto disable <策略> <幣對>');
+      console.log('   範例：auto disable ma-cross BTCUSDT');
+      return;
+    }
+    const success = disableAutoTrade(arg1, arg2);
+    if (success) {
+      console.log(`\n✅ 已停用自動交易：${arg1}:${arg2.toUpperCase()}\n`);
+    } else {
+      console.log(`\n❌ 找不到自動交易：${arg1}:${arg2.toUpperCase()}\n`);
+    }
+    return;
+  }
+
+  console.log(`❌ 未知子命令：${subcommand}`);
+  console.log('   可用：auto / auto enable / auto disable');
+}
+
+function handleRisk(subcommand?: string) {
+  if (subcommand === 'reset') {
+    resetDailyRisk();
+    console.log('\n✅ 已重置當日風控狀態\n');
+    return;
+  }
+
+  const status = getRiskStatus();
+
+  console.log('\n🛡️ 風控狀態：');
+  console.log('═══════════════════════════════════════');
+  console.log(`  📅 日期：${status.state.date}`);
+  console.log(`  💰 當前權益：${status.state.currentEquity.toFixed(2)} USDT`);
+  console.log(`  📈 權益高點：${status.state.equityPeak.toFixed(2)} USDT`);
+  console.log('');
+
+  const checks = status.checks;
+  const icon = (triggered: boolean) => triggered ? '🔴' : '🟢';
+
+  console.log(`  ${icon(checks.dailyLoss.triggered)} 單日損益：${checks.dailyLoss.current}（上限 ${checks.dailyLoss.limit}）`);
+  console.log(`  ${icon(checks.drawdown.triggered)} 最大回撤：${checks.drawdown.current}（上限 ${checks.drawdown.limit}）`);
+  console.log(`  ${icon(checks.dailyTrades.triggered)} 交易次數：${checks.dailyTrades.current}（上限 ${checks.dailyTrades.limit}）`);
+  console.log(`  ${icon(checks.consecutiveLosses.triggered)} 連續虧損：${checks.consecutiveLosses.current}（上限 ${checks.consecutiveLosses.limit}）`);
+  console.log('');
+}
+
 async function main() {
   const command = process.argv[2];
   const arg1 = process.argv[3];
@@ -222,6 +326,12 @@ async function main() {
         if (!arg1) { console.log('❌ 請指定策略，例如：ma-cross'); break; }
         console.log(`\n💡 回測請使用獨立腳本以獲得完整功能：`);
         console.log(`   npx tsx scripts/backtest.ts ${arg1} ${arg2 ?? 'BTCUSDT'}`);
+        break;
+      case 'auto':
+        await handleAuto(arg1, arg2, process.argv[5], process.argv[6]);
+        break;
+      case 'risk':
+        handleRisk(arg1);
         break;
       default:
         console.log(`❌ 未知命令：${command}`);

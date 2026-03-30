@@ -254,6 +254,24 @@ export function getRiskStatus(): RiskStatus {
   };
 }
 
+/** 同步初始資金與實際帳戶餘額 */
+export function syncInitialCapital(actualBalance: number): void {
+  const config = readRiskConfig();
+  config.initialCapital = actualBalance;
+  ensureDataDir();
+  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+
+  // 如果 risk-state 的 equityPeak / currentEquity 還是預設值 10000，一起更新
+  const state = readRiskState();
+  if (state.equityPeak === 10000) {
+    state.equityPeak = actualBalance;
+  }
+  if (state.currentEquity === 10000) {
+    state.currentEquity = actualBalance;
+  }
+  writeRiskState(state);
+}
+
 /** 手動重置當日風控 */
 export function resetDailyRisk(): void {
   const state = readRiskState();

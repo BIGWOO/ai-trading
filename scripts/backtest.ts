@@ -105,8 +105,9 @@ async function main() {
       return;
     }
 
-    // 配對交易，正確計算損益
+    // 配對交易，正確計算損益（使用 10% 倉位，與實盤策略一致）
     const initialCapital = 10000; // 假設初始資金 10000 USDT
+    const TRADE_RATIO = 0.1; // 每次用可用資金的 10%（與實盤一致）
     let capital = initialCapital;
     let holdings = 0;
     let buyPrice = 0; // 記錄實際買入價格
@@ -125,26 +126,28 @@ async function main() {
       const price = parseFloat(trade.price);
 
       if (trade.side === 'BUY') {
-        // 用全部資金買入，記錄買入價格
+        // 用可用資金的 10% 買入（與實盤 TRADE_RATIO 一致）
+        const tradeAmount = capital * TRADE_RATIO;
         buyPrice = price;
-        holdings = capital / price;
-        capital = 0;
-        console.log(`  🟢 ${time} 買入 @ ${price.toFixed(2)} (數量: ${holdings.toFixed(6)})`);
+        holdings = tradeAmount / price;
+        capital -= tradeAmount;
+        console.log(`  🟢 ${time} 買入 @ ${price.toFixed(2)} (數量: ${holdings.toFixed(6)}, 投入: ${tradeAmount.toFixed(2)} USDT)`);
       } else {
         // 全部賣出，PnL = holdings * sellPrice - holdings * buyPrice
         const sellValue = holdings * price;
         const costBasis = holdings * buyPrice;
         const pnl = sellValue - costBasis;
-        capital = sellValue;
+        capital += sellValue; // 賣出所得歸還可用資金
         holdings = 0;
         buyPrice = 0;
 
         if (pnl > 0) { winCount++; maxWin = Math.max(maxWin, pnl); }
         else { lossCount++; maxLoss = Math.min(maxLoss, pnl); }
 
-        // 計算回撤
-        if (capital > peak) peak = capital;
-        const drawdown = (peak - capital) / peak * 100;
+        // 計算回撤（用總資產 = 現金 + 持倉市值）
+        const totalAsset = capital; // 賣出後 holdings=0，capital 即為總資產
+        if (totalAsset > peak) peak = totalAsset;
+        const drawdown = (peak - totalAsset) / peak * 100;
         if (drawdown > maxDrawdown) maxDrawdown = drawdown;
 
         const emoji = pnl >= 0 ? '📈' : '📉';
@@ -155,7 +158,7 @@ async function main() {
     // 如果還有持倉，用最後價格計算
     if (holdings > 0) {
       const lastPrice = parseFloat(closePrices[closePrices.length - 1]);
-      capital = holdings * lastPrice;
+      capital += holdings * lastPrice;
       holdings = 0;
       console.log(`  ⏳ 未平倉部位以最後價格 ${lastPrice.toFixed(2)} 計算`);
     }

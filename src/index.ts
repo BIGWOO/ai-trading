@@ -14,8 +14,13 @@
  *   risk         — 風控管理
  */
 
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
 import { config } from 'dotenv';
-config();
+config({ path: join(__dirname, '..', '.env') });
 
 import {
   getAccountInfo, getPrice, getAllPrices, getOpenOrders,
@@ -264,6 +269,7 @@ async function handleAuto(subcommand?: string, arg1?: string, arg2?: string, arg
 
 function handleRisk(subcommand?: string) {
   if (subcommand === 'reset') {
+    console.log('⚠️ 此操作會清除當日損益、交易次數、連續虧損紀錄');
     resetDailyRisk();
     console.log('\n✅ 已重置當日風控狀態\n');
     return;

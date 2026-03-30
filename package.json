@@ -1,0 +1,21 @@
+{
+  "name": "ai-trading",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Binance Testnet 自動交易系統",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "balance": "tsx scripts/check-balance.ts",
+    "price": "tsx scripts/check-price.ts",
+    "strategy": "tsx scripts/run-strategy.ts",
+    "backtest": "tsx scripts/backtest.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}

@@ -32,12 +32,53 @@ description: >
 | 績效 / performance | `npx tsx src/index.ts performance` |
 | 交易紀錄 / trades | `npx tsx src/index.ts trades` |
 | 未成交訂單 | `npx tsx src/index.ts orders <幣對>` |
+| 查看策略參數 | `npx tsx src/index.ts config` |
+| 修改策略參數 | `npx tsx src/index.ts config set <策略> <參數> <值>` |
+| 重置策略參數 | `npx tsx src/index.ts config reset [策略]` |
+
+### Config 指令速查（策略參數調整）
+
+使用者說的話 → 對應指令：
+
+| 使用者意圖 | 指令 |
+|-----------|------|
+| 調整 RSI 超賣門檻到 25 | `config set rsi oversold 25` |
+| 調整 RSI 超買門檻到 75 | `config set rsi overbought 75` |
+| 調整 RSI 週期為 21 | `config set rsi period 21` |
+| 調整 RSI 交易比例為 0.2 | `config set rsi tradeRatio 0.2` |
+| 調整 MA 短週期為 5 | `config set ma-cross shortPeriod 5` |
+| 調整 MA 長週期為 30 | `config set ma-cross longPeriod 30` |
+| 調整 MA 交易比例為 0.15 | `config set ma-cross tradeRatio 0.15` |
+| 調整網格區間為 3% | `config set grid gridPercent 0.03` |
+| 調整網格數量為 20 | `config set grid gridCount 20` |
+| 調整網格每格比例為 0.1 | `config set grid tradeRatio 0.1` |
+| 重置 RSI 參數 | `config reset rsi` |
+| 重置所有策略參數 | `config reset` |
+
+### 可設定的參數說明
+
+**ma-cross（均線交叉策略）**
+- `shortPeriod` — 短期 MA 週期（預設 7，必須 < longPeriod）
+- `longPeriod` — 長期 MA 週期（預設 25，必須 > shortPeriod）
+- `tradeRatio` — 每次買入使用可用 USDT 比例（預設 0.1 = 10%）
+
+**rsi（RSI 策略）**
+- `period` — RSI 計算週期（預設 14）
+- `oversold` — 超賣門檻，低於此值發出買入訊號（預設 30，必須 < overbought）
+- `overbought` — 超買門檻，高於此值發出賣出訊號（預設 70，必須 > oversold）
+- `tradeRatio` — 每次買入使用可用 USDT 比例（預設 0.1 = 10%）
+
+**grid（網格交易策略）**
+- `gridPercent` — 網格區間（從當前價格上下各此比例，預設 0.05 = ±5%）
+- `gridCount` — 網格數量（預設 10）
+- `tradeRatio` — 每格使用可用 USDT 比例（預設 0.05 = 5%）
 
 ## 預設值
 
 - 幣對預設 `BTCUSDT`
 - 回測間隔預設 `1h`，數量預設 `500`
 - 可用策略：`ma-cross`、`rsi`、`grid`
+- 策略參數設定儲存於 `data/strategy-config.json`（不存在時自動建立並使用預設值）
 
 ## 執行規則
 

@@ -37,6 +37,10 @@ import {
 } from './scheduler.js';
 import type { Strategy, BacktestableStrategy } from './strategies/base.js';
 import { executeWithRisk } from './trade-executor.js';
+import {
+  getAllStrategyConfigs, updateStrategyConfig, resetStrategyConfig,
+  getDefaultConfigs, type StrategyName,
+} from './strategy-config.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -65,6 +69,9 @@ function showHelp() {
   console.log('    auto disable <策略> <幣對>       停用自動交易');
   console.log('    risk                 查看風控狀態');
   console.log('    risk reset           重置當日風控');
+  console.log('    config               查看所有策略設定');
+  console.log('    config set <策略> <參數> <值>  修改策略參數');
+  console.log('    config reset [策略]  重置為預設值');
   console.log('');
   console.log('  可用策略：');
   for (const [key, strategy] of Object.entries(STRATEGIES)) {
@@ -289,6 +296,88 @@ function handleRisk(subcommand?: string) {
   console.log('');
 }
 
+function handleConfig(subcommand?: string, arg1?: string, arg2?: string, arg3?: string) {
+  const VALID_STRATEGIES: StrategyName[] = ['ma-cross', 'rsi', 'grid'];
+
+  // config — 顯示所有策略設定
+  if (!subcommand || subcommand === 'list') {
+    const all = getAllStrategyConfigs();
+    const defaults = getDefaultConfigs();
+
+    console.log('\n⚙️ 策略參數設定：');
+    console.log('═══════════════════════════════════════');
+
+    for (const strategy of VALID_STRATEGIES) {
+      const cfg = all[strategy];
+      const def = defaults[strategy];
+      console.log(`\n  📋 ${strategy}`);
+      for (const [key, val] of Object.entries(cfg)) {
+        const isDefault = (def as unknown as Record<string, unknown>)[key] === val;
+        const marker = isDefault ? '' : ' ✏️';
+        console.log(`     ${key.padEnd(14)} ${val}${marker}`);
+      }
+    }
+    console.log('');
+    console.log('  ✏️ = 已修改（與預設值不同）');
+    console.log('');
+    return;
+  }
+
+  // config set <策略> <參數> <值>
+  if (subcommand === 'set') {
+    if (!arg1 || !arg2 || !arg3) {
+      console.log('❌ 用法：config set <策略> <參數> <值>');
+      console.log('   範例：config set rsi oversold 25');
+      return;
+    }
+    const strategy = arg1 as StrategyName;
+    if (!VALID_STRATEGIES.includes(strategy)) {
+      console.log(`❌ 未知策略：${arg1}`);
+      console.log(`   可用策略：${VALID_STRATEGIES.join(', ')}`);
+      return;
+    }
+    const param = arg2;
+    const rawValue = arg3;
+    const numValue = Number(rawValue);
+    if (isNaN(numValue)) {
+      console.log(`❌ 參數值必須是數字，得到：${rawValue}`);
+      return;
+    }
+
+    try {
+      const updated = updateStrategyConfig(strategy, { [param]: numValue } as never);
+      console.log(`\n✅ 已更新 ${strategy}.${param} = ${numValue}`);
+      console.log(`   目前設定：${JSON.stringify(updated, null, 2).replace(/\n/g, '\n   ')}`);
+      console.log('');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`❌ 更新失敗：${msg}`);
+    }
+    return;
+  }
+
+  // config reset [策略]
+  if (subcommand === 'reset') {
+    if (arg1) {
+      const strategy = arg1 as StrategyName;
+      if (!VALID_STRATEGIES.includes(strategy)) {
+        console.log(`❌ 未知策略：${arg1}`);
+        console.log(`   可用策略：${VALID_STRATEGIES.join(', ')}`);
+        return;
+      }
+      resetStrategyConfig(strategy);
+      console.log(`\n✅ 已重置 ${strategy} 為預設值\n`);
+    } else {
+      resetStrategyConfig();
+      console.log('\n✅ 已重置所有策略為預設值\n');
+    }
+    return;
+  }
+
+  console.log(`❌ 未知子命令：${subcommand}`);
+  console.log('   可用：config / config set / config reset');
+}
+
 async function main() {
   const command = process.argv[2];
   const arg1 = process.argv[3];
@@ -333,6 +422,9 @@ async function main() {
         break;
       case 'risk':
         handleRisk(arg1);
+        break;
+      case 'config':
+        handleConfig(arg1, arg2, process.argv[5], process.argv[6]);
         break;
       default:
         console.log(`❌ 未知命令：${command}`);

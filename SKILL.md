@@ -50,23 +50,52 @@ description: >
 
 ## 自動交易排程
 
-用 OpenClaw cron 設定定時執行：
+當使用者啟用自動交易後，用 **OpenClaw cron** 設定定時排程。
 
+### 設定方式
+
+使用 `openclaw cron add` CLI 指令建立排程：
+
+```bash
+openclaw cron add \
+  --name "ai-trading-auto" \
+  --every 5m \
+  --message "執行自動交易：cd <專案目錄> && npx tsx scripts/auto-trade.ts --json。把結果摘要回報，包含：策略名稱、訊號（BUY/SELL/HOLD）、原因。有成交則報告價格和數量。HOLD 時簡短回報即可。" \
+  --announce \
+  --model sonnet \
+  --timeout 60000 \
+  --description "自動交易排程，每5分鐘檢查"
 ```
-排程指令：npx tsx scripts/auto-trade.ts --json
-工作目錄：SKILL.md 所在目錄（專案根目錄）
-建議間隔：5 分鐘
-```
 
-auto-trade.ts 內建防重疊（lock file），安全重複呼叫。
+如需回報到特定頻道，加上 `--channel discord --to <channel_id>`。
 
-解析 `--json` 輸出的 `results` 陣列：
-- `status: "executed"` → 回報交易結果（BUY/SELL/HOLD）
-- `status: "risk-blocked"` → 回報風控攔截原因
-- `status: "skipped"` → 靜默（尚未到期）
-- `status: "error"` → 回報錯誤
+### 管理排程
 
-只有 executed 含 BUY/SELL 和 risk-blocked 時需要主動通知使用者。
+| 操作 | 指令 |
+|------|------|
+| 查看排程 | `openclaw cron list` |
+| 暫停排程 | `openclaw cron disable ai-trading-auto` |
+| 恢復排程 | `openclaw cron enable ai-trading-auto` |
+| 刪除排程 | `openclaw cron rm ai-trading-auto` |
+| 手動觸發 | `openclaw cron run ai-trading-auto` |
+
+### 為什麼用 OpenClaw cron？
+
+- ✅ 回報結果自動送到 Discord/Telegram 等聊天頻道
+- ✅ 用 Sonnet 模型解析輸出，轉成人類易讀格式
+- ✅ 不需要設定系統層級排程（crontab/launchd/systemd）
+- ✅ 跨平台（macOS/Linux/Windows WSL 都適用）
+- ✅ 統一管理，`openclaw cron list` 一目了然
+
+### 解析 auto-trade.ts 輸出
+
+auto-trade.ts 加 `--json` flag 輸出 `results` 陣列，每個元素包含：
+- `status: "executed"` → 回報交易結果（BUY/SELL/HOLD + 原因）
+- `status: "risk-blocked"` → 回報風控攔截原因（⚠️ 務必通知使用者）
+- `status: "skipped"` → 尚未到執行間隔，可靜默
+- `status: "error"` → 回報錯誤（⚠️ 務必通知使用者）
+
+auto-trade.ts 內建防重疊機制（atomic lock file），安全重複呼叫。
 
 ## 輸出格式（Discord）
 

@@ -13,25 +13,40 @@ import {
   getNetQuantity, getTotalCommission, extractBaseAsset,
 } from '../binance.js';
 import { recordTrade } from '../storage.js';
-import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
+import { hasPosition, openPosition, closePosition, getPosition, shrinkPosition } from '../position.js';
 import type { Strategy, BacktestableStrategy, AnalysisResult, StrategyResult } from './base.js';
+import type { ExecutionContext } from '../execution-context.js';
 import { getStrategyConfig } from '../strategy-config.js';
 
 export const rsiStrategy: Strategy & BacktestableStrategy = {
+  id: 'rsi',
   name: 'RSI 策略',
   get description() {
     const cfg = getStrategyConfig('rsi');
     return `RSI(${cfg.period}) 超買超賣訊號`;
   },
 
-  async analyze(symbol: string): Promise<AnalysisResult> {
-    const cfg = getStrategyConfig('rsi');
+  async analyze(symbol: string, ctx?: ExecutionContext): Promise<AnalysisResult> {
+    // 優先從 ctx 讀取，否則 fallback legacy
+    const defaults = getStrategyConfig('rsi');
+    const cfg = ctx?.strategyConfig && Object.keys(ctx.strategyConfig).length > 0
+      ? {
+          period: (ctx.strategyConfig.period as number) ?? defaults.period,
+          oversold: (ctx.strategyConfig.oversold as number) ?? defaults.oversold,
+          overbought: (ctx.strategyConfig.overbought as number) ?? defaults.overbought,
+          tradeRatio: (ctx.strategyConfig.tradeRatio as number) ?? defaults.tradeRatio,
+        }
+      : defaults;
     // 多拉一根，排除最後未收盤的 K 線
     const klines = await getKlines(symbol, '1h', cfg.period + 21);
     // 排除最後一根未收盤 K 線
     const closedKlines = klines.slice(0, -1);
     const closePrices = closedKlines.map((k) => k.close);
-    return this.analyzeKlines(closePrices, closePrices.length - 1);
+    // Fix #1: 若 ctx 有 strategyConfig，傳入 overrides 給 analyzeKlines
+    const overrides = ctx?.strategyConfig && Object.keys(ctx.strategyConfig).length > 0
+      ? { period: cfg.period, oversold: cfg.oversold, overbought: cfg.overbought }
+      : undefined;
+    return this.analyzeKlines(closePrices, closePrices.length - 1, overrides);
   },
 
   analyzeKlines(closePrices: string[], index: number, overrides?: Partial<{ period: number; oversold: number; overbought: number }>): AnalysisResult {
@@ -82,15 +97,28 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
     };
   },
 
-  async execute(symbol: string, result: AnalysisResult): Promise<StrategyResult> {
+  async execute(symbol: string, result: AnalysisResult, ctx?: ExecutionContext): Promise<StrategyResult> {
+    // 優先從 ctx 讀取，否則 fallback legacy
+    const defaults = getStrategyConfig('rsi');
+    const ctxCfg = ctx?.strategyConfig && Object.keys(ctx.strategyConfig).length > 0
+      ? {
+          period: (ctx.strategyConfig.period as number) ?? defaults.period,
+          oversold: (ctx.strategyConfig.oversold as number) ?? defaults.oversold,
+          overbought: (ctx.strategyConfig.overbought as number) ?? defaults.overbought,
+          tradeRatio: (ctx.strategyConfig.tradeRatio as number) ?? defaults.tradeRatio,
+        }
+      : defaults;
+
     if (result.signal === 'HOLD') {
       console.log(`⏸️ [${this.name}] ${result.reason}`);
       return {
         action: 'HOLD',
         symbol,
         strategy: this.name,
+        strategyId: this.id,
         reason: result.reason,
         timestamp: Date.now(),
+        configVersion: ctx?.configVersion,
       };
     }
 
@@ -105,12 +133,14 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
           action: 'HOLD',
           symbol,
           strategy: this.name,
+          strategyId: this.id,
           reason: `已有 ${symbol} 部位，跳過買入`,
           timestamp: Date.now(),
+          configVersion: ctx?.configVersion,
         };
       }
 
-      const { tradeRatio } = getStrategyConfig('rsi');
+      const { tradeRatio } = ctxCfg;
       const account = await getAccountInfo();
       const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
       const available = parseFloat(usdtBalance?.free ?? '0');
@@ -127,8 +157,10 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
           action: 'HOLD',
           symbol,
           strategy: this.name,
+          strategyId: this.id,
           reason: 'USDT 餘額不足，無法買入',
           timestamp: Date.now(),
+          configVersion: ctx?.configVersion,
         };
       }
 
@@ -142,12 +174,15 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       const netQty = getNetQuantity(order, baseAsset);
 
       // 記錄部位（用扣手續費後的淨數量）
+      // Fix #6: 傳入 strategyId 和 configVersion
       openPosition({
         strategy: this.name,
+        strategyId: this.id,
         symbol,
         entryPrice: actualPrice,
         quantity: netQty,
         orderId: order.orderId,
+        configVersion: ctx?.configVersion,
       });
 
       await recordTrade({
@@ -157,19 +192,23 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         price: actualPrice,
         quantity: netQty,
         strategy: this.name,
+        strategyId: this.id,
         orderId: order.orderId,
         reason: result.reason,
+        configVersion: ctx?.configVersion,
       });
 
       return {
         action: 'BUY',
         symbol,
         strategy: this.name,
+        strategyId: this.id,
         price: actualPrice,
         quantity: netQty,
         orderId: order.orderId,
         reason: result.reason,
         timestamp: Date.now(),
+        configVersion: ctx?.configVersion,
       };
     }
 
@@ -182,8 +221,10 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
           action: 'HOLD',
           symbol,
           strategy: this.name,
+          strategyId: this.id,
           reason: `沒有 ${symbol} 部位，跳過賣出`,
           timestamp: Date.now(),
+          configVersion: ctx?.configVersion,
         };
       }
 
@@ -205,8 +246,14 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       const grossPnl = (parseFloat(actualPrice) - parseFloat(position.entryPrice)) * parseFloat(actualQty);
       const pnl = grossPnl - sellCommissionUsdt;
 
-      // 下單成功後才關閉本地部位
-      closePosition(this.name, symbol);
+      // 下單成功後判斷是否完整平倉
+      // 若 executedQty >= position.quantity * 0.99（容忍精度誤差），視為完整平倉
+      const isFullClose = parseFloat(actualQty) >= parseFloat(position.quantity) * 0.99;
+      if (isFullClose) {
+        closePosition(this.name, symbol);
+      } else {
+        shrinkPosition(this.name, symbol, actualQty);
+      }
 
       await recordTrade({
         timestamp: Date.now(),
@@ -215,20 +262,24 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         price: actualPrice,
         quantity: actualQty,
         strategy: this.name,
+        strategyId: this.id,
         orderId: order.orderId,
         reason: result.reason,
+        configVersion: ctx?.configVersion,
       });
 
       return {
         action: 'SELL',
         symbol,
         strategy: this.name,
+        strategyId: this.id,
         price: actualPrice,
         quantity: actualQty,
         orderId: order.orderId,
         reason: result.reason,
         timestamp: Date.now(),
         pnl,
+        configVersion: ctx?.configVersion,
       };
     }
 
@@ -237,8 +288,10 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
       action: 'HOLD',
       symbol,
       strategy: this.name,
+      strategyId: this.id,
       reason: result.reason,
       timestamp: Date.now(),
+      configVersion: ctx?.configVersion,
     };
   },
 };

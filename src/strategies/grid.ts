@@ -5,15 +5,19 @@
  *
  * 含狀態持久化：不會每次都 destructive reset
  * 執行前檢查是否已有活躍網格，只補缺失的單
+ *
+ * Fix #6: grid-state.json 格式改為 { entries: GridEntry[], touchedSymbols: string[] }
+ * Fix #8: 非 fill 的結果改用 eventType: 'order_submitted'
+ * Fix #12: 移除未使用的 recordTrade import
  */
 
 import {
   getPrice, placeOrder, getOpenOrders, cancelOrder, getAccountInfo,
   getSymbolPrecision, adjustQuantity, adjustPrice,
 } from '../binance.js';
-import { recordTrade } from '../storage.js';
 import type { Strategy, AnalysisResult, StrategyResult } from './base.js';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import type { ExecutionContext } from '../execution-context.js';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { atomicWriteJson } from '../utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +38,8 @@ interface GridConfig {
   quantityPerGrid: string;
 }
 
-interface GridState {
+/** Fix #6: 單一網格條目型別 */
+export interface GridEntry {
   /** 交易對 */
   symbol: string;
   /** 建立時間 */
@@ -53,6 +58,15 @@ interface GridState {
   active: boolean;
 }
 
+/** Fix #6: grid-state.json 的完整結構 */
+interface GridStateFile {
+  entries: GridEntry[];
+  touchedSymbols: string[];
+}
+
+// 保留舊型別名稱作別名（向後相容）
+type GridState = GridEntry;
+
 // 預設值已移至 strategy-config.ts，此處透過 getStrategyConfig('grid') 動態取得
 
 // ===== 網格狀態管理 =====
@@ -63,59 +77,90 @@ function ensureDataDir(): void {
   }
 }
 
-function readGridState(symbol: string): GridState | null {
+/**
+ * 讀取 grid-state.json，自動遷移舊格式（純 array）
+ * Fix #6: 若讀到純 array，包成 { entries: array, touchedSymbols: [] }
+ */
+function readGridStateFile(): GridStateFile {
   ensureDataDir();
-  if (!existsSync(GRID_STATE_FILE)) return null;
+  if (!existsSync(GRID_STATE_FILE)) {
+    return { entries: [], touchedSymbols: [] };
+  }
   try {
     const raw = readFileSync(GRID_STATE_FILE, 'utf-8');
-    const states = JSON.parse(raw) as GridState[];
-    return states.find((s) => s.symbol === symbol.toUpperCase() && s.active) ?? null;
+    const data = JSON.parse(raw);
+    if (Array.isArray(data)) {
+      // 舊格式：純 array，自動遷移
+      return { entries: data as GridEntry[], touchedSymbols: [] };
+    }
+    const stateFile = data as Partial<GridStateFile>;
+    return {
+      entries: stateFile.entries ?? [],
+      touchedSymbols: stateFile.touchedSymbols ?? [],
+    };
   } catch {
-    return null;
+    return { entries: [], touchedSymbols: [] };
   }
 }
 
-function writeGridState(state: GridState): void {
+function writeGridStateFile(stateFile: GridStateFile): void {
   ensureDataDir();
-  let states: GridState[] = [];
-  if (existsSync(GRID_STATE_FILE)) {
-    try {
-      states = JSON.parse(readFileSync(GRID_STATE_FILE, 'utf-8')) as GridState[];
-    } catch {
-      states = [];
-    }
-  }
+  atomicWriteJson(GRID_STATE_FILE, stateFile);
+}
+
+function readGridState(symbol: string): GridState | null {
+  const { entries } = readGridStateFile();
+  return entries.find((s) => s.symbol === symbol.toUpperCase() && s.active) ?? null;
+}
+
+function writeGridState(state: GridState): void {
+  const stateFile = readGridStateFile();
 
   // 替換同幣對的活躍狀態
-  const filtered = states.filter(
+  stateFile.entries = stateFile.entries.filter(
     (s) => !(s.symbol === state.symbol && s.active),
   );
-  filtered.push(state);
-  atomicWriteJson(GRID_STATE_FILE, filtered);
+  stateFile.entries.push(state);
+
+  // 記錄 touchedSymbols（Fix #6）
+  if (!stateFile.touchedSymbols.includes(state.symbol)) {
+    stateFile.touchedSymbols.push(state.symbol);
+  }
+
+  writeGridStateFile(stateFile);
 }
 
 function deactivateGridState(symbol: string): void {
   ensureDataDir();
   if (!existsSync(GRID_STATE_FILE)) return;
   try {
-    const states = JSON.parse(readFileSync(GRID_STATE_FILE, 'utf-8')) as GridState[];
-    for (const s of states) {
+    const stateFile = readGridStateFile();
+    for (const s of stateFile.entries) {
       if (s.symbol === symbol.toUpperCase() && s.active) {
         s.active = false;
       }
     }
-    atomicWriteJson(GRID_STATE_FILE, states);
+    writeGridStateFile(stateFile);
   } catch {
     // 忽略
   }
 }
 
 export const gridStrategy: Strategy = {
+  id: 'grid' as const,
   name: '網格交易策略',
   description: '在價格區間內等距掛買賣單，適合震盪行情',
 
-  async analyze(symbol: string): Promise<AnalysisResult> {
-    const cfg = getStrategyConfig('grid');
+  async analyze(symbol: string, ctx?: ExecutionContext): Promise<AnalysisResult> {
+    // Fix #1: 優先從 ctx.strategyConfig 讀取，fallback 到 getStrategyConfig
+    const baseCfg = getStrategyConfig('grid');
+    const cfg = ctx?.strategyConfig && Object.keys(ctx.strategyConfig).length > 0
+      ? {
+          gridPercent: (ctx.strategyConfig['gridPercent'] as number | undefined) ?? baseCfg.gridPercent,
+          gridCount: (ctx.strategyConfig['gridCount'] as number | undefined) ?? baseCfg.gridCount,
+          tradeRatio: (ctx.strategyConfig['tradeRatio'] as number | undefined) ?? baseCfg.tradeRatio,
+        }
+      : baseCfg;
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);
 
@@ -157,8 +202,16 @@ export const gridStrategy: Strategy = {
     };
   },
 
-  async execute(symbol: string, _result: AnalysisResult): Promise<StrategyResult[]> {
-    const cfg = getStrategyConfig('grid');
+  async execute(symbol: string, _result: AnalysisResult, ctx?: ExecutionContext): Promise<StrategyResult[]> {
+    // Fix #1: 優先從 ctx.strategyConfig 讀取，fallback 到 getStrategyConfig
+    const baseCfg = getStrategyConfig('grid');
+    const cfg = ctx?.strategyConfig && Object.keys(ctx.strategyConfig).length > 0
+      ? {
+          gridPercent: (ctx.strategyConfig['gridPercent'] as number | undefined) ?? baseCfg.gridPercent,
+          gridCount: (ctx.strategyConfig['gridCount'] as number | undefined) ?? baseCfg.gridCount,
+          tradeRatio: (ctx.strategyConfig['tradeRatio'] as number | undefined) ?? baseCfg.tradeRatio,
+        }
+      : baseCfg;
     const upperSymbol = symbol.toUpperCase();
 
     const priceInfo = await getPrice(symbol);
@@ -179,10 +232,13 @@ export const gridStrategy: Strategy = {
       console.log('⚠️ USDT 餘額不足，無法建立網格');
       return [{
         action: 'HOLD',
+        eventType: 'order_submitted',
         symbol: upperSymbol,
         strategy: this.name,
+        strategyId: this.id,
         reason: 'USDT 餘額不足，無法建立網格',
         timestamp: Date.now(),
+        configVersion: ctx?.configVersion,
       }];
     }
 
@@ -232,10 +288,13 @@ export const gridStrategy: Strategy = {
       console.log(`\n✅ 補單完成！成功 ${addedCount} 筆${failedCount > 0 ? `，失敗 ${failedCount} 筆` : ''}`);
       return [{
         action: replenishAction,
+        eventType: 'order_submitted',
         symbol: upperSymbol,
         strategy: this.name,
+        strategyId: this.id,
         reason: `網格補單完成，成功 ${addedCount} 筆${failedCount > 0 ? `，失敗 ${failedCount} 筆` : ''}`,
         timestamp: Date.now(),
+        configVersion: ctx?.configVersion,
       }];
     }
 
@@ -275,10 +334,13 @@ export const gridStrategy: Strategy = {
         console.log(`   請手動到 Binance 確認並取消殘留掛單後重新執行`);
         return [{
           action: 'HOLD',
+          eventType: 'order_submitted',
           symbol: upperSymbol,
           strategy: this.name,
+          strategyId: this.id,
           reason: `${cancelFailed} 筆掛單取消失敗，中止建立新網格`,
           timestamp: Date.now(),
+          configVersion: ctx?.configVersion,
         }];
       }
     }
@@ -328,12 +390,16 @@ export const gridStrategy: Strategy = {
     // 網格掛單不寫入 trades.json（掛單 ≠ 成交，避免污染績效計算）
     // 實際成交會由 Binance 端追蹤，未來可透過 getTradeHistory 同步
 
+    // Fix #5 (R1-8): 掛單不等於成交，使用 order_submitted
     return [{
       action: 'BUY',
+      eventType: 'order_submitted',
       symbol: upperSymbol,
       strategy: this.name,
+      strategyId: this.id,
       reason: `網格建立完成！買單 ${buyCount} 筆 / 賣單 ${sellCount} 筆`,
       timestamp: Date.now(),
+      configVersion: ctx?.configVersion,
     }];
   },
 };

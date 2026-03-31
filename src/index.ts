@@ -41,6 +41,9 @@ import {
   getAllStrategyConfigs, updateStrategyConfig, resetStrategyConfig,
   getDefaultConfigs, type StrategyName,
 } from './strategy-config.js';
+import { acquireLock, releaseLock } from './utils/global-lock.js';
+import { mutateEnvelope } from './utils/config-ops.js';
+import { createExecutionContext, validateStrategyParams } from './execution-context.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -128,10 +131,24 @@ async function handleStrategy(name: string, symbol: string) {
     return;
   }
 
-  console.log(`\n🤖 執行 ${strategy.name}（${symbol}）...`);
-  // 透過風控包裝器執行（分析 + 風控 + 交易）
-  await executeWithRisk({ strategy, symbol });
-  console.log('\n✅ 完成！\n');
+  // Fix R5-2: 手動執行策略必須取 global lock，避免與 auto-trade cron 併發
+  const lock = acquireLock('manual-trade', 30);
+  if (!lock) {
+    console.log('❌ 無法取得 lock（另一個程序正在執行交易），請稍後再試');
+    return;
+  }
+
+  try {
+    console.log(`\n🤖 執行 ${strategy.name}（${symbol}）...`);
+    // Fix R5-2: 傳入 fencingToken 給 createExecutionContext
+    // Fix R6-2: 改用頂部 static import（無需動態 import）
+    const ctx = createExecutionContext(strategy.id, symbol, lock.token);
+    // 透過風控包裝器執行（分析 + 風控 + 交易）
+    await executeWithRisk({ strategy, symbol, ctx });
+    console.log('\n✅ 完成！\n');
+  } finally {
+    releaseLock(lock.token);
+  }
 }
 
 async function handleOrders(symbol?: string) {
@@ -345,9 +362,36 @@ function handleConfig(subcommand?: string, arg1?: string, arg2?: string, arg3?: 
     }
 
     try {
-      const updated = updateStrategyConfig(strategy, { [param]: numValue } as never);
+      // Fix R2-3: 先取 lock，再同時更新 envelope + legacy（避免 split-brain）
+      const lock = acquireLock('config-set', 30);
+      if (!lock) {
+        console.log('❌ 無法取得 lock（另一個程序正在執行），操作已取消');
+        return;
+      }
+      let updated: ReturnType<typeof updateStrategyConfig> | undefined;
+      try {
+        // Fix R6-1: 先驗證參數合法性（key + 值域），不合法直接 throw，不會寫入任何檔案
+        validateStrategyParams(strategy, { [param]: numValue });
+        // Fix R5-1: 調換寫入順序 — 先寫 envelope（受 lock 保護、有 snapshot），
+        // 成功後再寫 legacy。若 envelope 寫入失敗，legacy 不會被修改，避免 split-brain。
+        mutateEnvelope(
+          lock.token,
+          (env) => {
+            const current = env.strategyConfigs[strategy] as unknown as Record<string, unknown>;
+            current[param] = numValue;
+          },
+          `config set ${strategy}.${param}=${numValue}`,
+        );
+        // Fix R5-1: envelope 成功後再寫 legacy，確保來源一致
+        updated = updateStrategyConfig(strategy, { [param]: numValue } as never);
+      } finally {
+        releaseLock(lock.token);
+      }
+
       console.log(`\n✅ 已更新 ${strategy}.${param} = ${numValue}`);
-      console.log(`   目前設定：${JSON.stringify(updated, null, 2).replace(/\n/g, '\n   ')}`);
+      if (updated) {
+        console.log(`   目前設定：${JSON.stringify(updated, null, 2).replace(/\n/g, '\n   ')}`);
+      }
       console.log('');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -365,10 +409,45 @@ function handleConfig(subcommand?: string, arg1?: string, arg2?: string, arg3?: 
         console.log(`   可用策略：${VALID_STRATEGIES.join(', ')}`);
         return;
       }
-      resetStrategyConfig(strategy);
+
+      // Fix R2-3: 先取 lock，再同時更新 envelope + legacy
+      const lock = acquireLock('config-reset', 30);
+      if (!lock) {
+        console.log('❌ 無法取得 lock（另一個程序正在執行），操作已取消');
+        return;
+      }
+      try {
+        // Fix R5-1: 先寫 envelope，成功後再寫 legacy，避免 split-brain
+        const defaults = getDefaultConfigs();
+        mutateEnvelope(lock.token, (env) => {
+          (env.strategyConfigs as unknown as Record<string, unknown>)[strategy] = defaults[strategy];
+        }, `config reset ${strategy}`);
+        // Fix R5-1: envelope 成功後再寫 legacy
+        resetStrategyConfig(strategy);
+      } finally {
+        releaseLock(lock.token);
+      }
+
       console.log(`\n✅ 已重置 ${strategy} 為預設值\n`);
     } else {
-      resetStrategyConfig();
+      // Fix R2-3: 先取 lock，再同時更新 envelope + legacy
+      const lock = acquireLock('config-reset', 30);
+      if (!lock) {
+        console.log('❌ 無法取得 lock（另一個程序正在執行），操作已取消');
+        return;
+      }
+      try {
+        // Fix R5-1: 先寫 envelope，成功後再寫 legacy，避免 split-brain
+        const defaults = getDefaultConfigs();
+        mutateEnvelope(lock.token, (env) => {
+          env.strategyConfigs = defaults;
+        }, 'config reset all');
+        // Fix R5-1: envelope 成功後再寫 legacy
+        resetStrategyConfig();
+      } finally {
+        releaseLock(lock.token);
+      }
+
       console.log('\n✅ 已重置所有策略為預設值\n');
     }
     return;

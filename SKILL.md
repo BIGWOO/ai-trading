@@ -54,7 +54,7 @@ description: >
 
 ### 設定方式
 
-使用 `openclaw cron add` CLI 指令建立排程：
+當使用者要求啟用自動交易排程時，用 `exec` 執行以下指令：
 
 ```bash
 openclaw cron add \
@@ -67,25 +67,23 @@ openclaw cron add \
   --description "自動交易排程，每5分鐘檢查"
 ```
 
-如需回報到特定頻道，加上 `--channel discord --to <channel_id>`。
+若使用者在特定頻道發起，加上 `--channel discord --to <channel_id>` 讓結果回報到該頻道。
 
 ### 管理排程
 
-| 操作 | 指令 |
-|------|------|
-| 查看排程 | `openclaw cron list` |
-| 暫停排程 | `openclaw cron disable ai-trading-auto` |
-| 恢復排程 | `openclaw cron enable ai-trading-auto` |
-| 刪除排程 | `openclaw cron rm ai-trading-auto` |
-| 手動觸發 | `openclaw cron run ai-trading-auto` |
+使用者說「暫停/停止/刪除排程」時，用 `exec` 執行對應指令：
 
-### 為什麼用 OpenClaw cron？
+- 查看排程 → `openclaw cron list`
+- 暫停排程 → `openclaw cron disable ai-trading-auto`
+- 恢復排程 → `openclaw cron enable ai-trading-auto`
+- 刪除排程 → `openclaw cron rm ai-trading-auto`
+- 手動觸發一次 → `openclaw cron run ai-trading-auto`
 
-- ✅ 回報結果自動送到 Discord/Telegram 等聊天頻道
-- ✅ 用 Sonnet 模型解析輸出，轉成人類易讀格式
-- ✅ 不需要設定系統層級排程（crontab/launchd/systemd）
-- ✅ 跨平台（macOS/Linux/Windows WSL 都適用）
-- ✅ 統一管理，`openclaw cron list` 一目了然
+### 注意事項
+
+- 必須用 OpenClaw cron，不要用系統排程（crontab/launchd/systemd）
+- OpenClaw cron 可自動將結果送到聊天頻道，跨平台通用
+- 使用者不需要知道這些指令的細節，agent 負責操作即可
 
 ### 解析 auto-trade.ts 輸出
 

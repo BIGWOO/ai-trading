@@ -3,12 +3,13 @@
  * 被 OpenClaw cron 呼叫：npx tsx scripts/auto-trade.ts [--json]
  *
  * 流程：
- * 1. 取得 lock file 防止重疊執行
- * 2. 讀取 auto-trading.json 中 enabled=true 的項目
+ * 1. 用 global-lock 防止重疊執行
+ * 2. 讀取 config-envelope.activeStrategies 中 enabled=true 的項目
  * 3. 檢查各項目距離上次執行是否已過 interval
- * 4. 對到期的項目：先 checkRisk() → 通過才 execute()
- * 5. 更新 auto-trading.json 和 risk-state
- * 6. 輸出 JSON 結果（方便 Skill 推送通知）
+ * 4. 對到期的項目：先 checkRisk() → 通過才 execute()（含 close-only 攔截）
+ * 5. 更新 auto-trade-runtime.json 和 risk-state
+ * 6. 更新 probation-runtime.json 的 peakSinceActivation（不需鎖）
+ * 7. 輸出 JSON 結果（方便 Skill 推送通知）
  */
 
 import { dirname, join } from 'node:path';
@@ -19,17 +20,24 @@ const __dirname = dirname(__filename);
 import { config } from 'dotenv';
 config({ path: join(__dirname, '..', '.env') });
 
-import { openSync, readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, closeSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync } from 'node:fs';
 import { cleanupTmpFiles } from '../src/utils/atomic-write.js';
+import { acquireLock, releaseLock, renewLock } from '../src/utils/global-lock.js';
 import { getEnvInfo, getAccountInfo } from '../src/binance.js';
 import { maCrossStrategy } from '../src/strategies/ma-cross.js';
 import { rsiStrategy } from '../src/strategies/rsi.js';
 import { gridStrategy } from '../src/strategies/grid.js';
 import type { Strategy, StrategyResult } from '../src/strategies/base.js';
 import { getAutoTrades, isDue, updateAutoTradeResult } from '../src/scheduler.js';
-import { syncInitialCapital } from '../src/risk-control.js';
+import { syncInitialCapital, getRiskStatus } from '../src/risk-control.js';
 import { executeWithRisk } from '../src/trade-executor.js';
+import { createExecutionContext } from '../src/execution-context.js';
+import { getProbationRuntime, updateProbationPeak, cleanupStalePeakLock } from '../src/utils/probation-runtime.js';
+import { getConfigEnvelope } from '../src/utils/config-envelope.js';
+import { mutateEnvelope } from '../src/utils/config-ops.js';
+import { migratePositions } from '../src/position.js';
+import { migrateTrades } from '../src/storage.js';
+import { isTradingFlat } from '../src/utils/flat-check.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -37,97 +45,13 @@ const STRATEGIES: Record<string, Strategy> = {
   'grid': gridStrategy,
 };
 
-// ===== Lock file 機制 =====
-
 const DATA_DIR = join(__dirname, '..', 'data');
-const LOCK_FILE = join(DATA_DIR, '.auto-trade.lock');
-const LOCK_MAX_AGE_MS = 30 * 60 * 1000; // 30 分鐘
-
-interface LockFileContent {
-  pid: number;
-  startedAt: number;
-  token: string;
-}
-
-/** 本次執行的唯一 token，用於 releaseLock 驗證 ownership */
-const lockToken = randomUUID();
 
 function ensureDataDir(): void {
   if (!existsSync(DATA_DIR)) {
     mkdirSync(DATA_DIR, { recursive: true });
   }
 }
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** 嘗試用 O_WRONLY | O_CREAT | O_EXCL (wx) 原子建立 lock 檔 */
-function tryCreateLock(lockData: string): boolean {
-  try {
-    const fd = openSync(LOCK_FILE, 'wx');
-    writeFileSync(fd, lockData, 'utf-8');
-    closeSync(fd);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function acquireLock(): boolean {
-  ensureDataDir();
-
-  const lockData = JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: lockToken });
-
-  // 嘗試原子建檔
-  if (tryCreateLock(lockData)) return true;
-
-  // Lock 已存在，檢查是否為 orphan
-  try {
-    const existing = JSON.parse(readFileSync(LOCK_FILE, 'utf-8')) as LockFileContent;
-    const isAlive = isPidAlive(existing.pid);
-    const isStale = Date.now() - existing.startedAt > LOCK_MAX_AGE_MS;
-
-    if (isAlive && !isStale) {
-      console.log(`⚠️ 另一個 auto-trade 正在執行中（PID: ${existing.pid}），跳過本次執行`);
-      return false;
-    }
-
-    // Orphan lock：PID 已死或超時
-    console.log(`🔓 清除過期 lock（PID: ${existing.pid}, 啟動於 ${new Date(existing.startedAt).toLocaleString('zh-TW')}）`);
-    unlinkSync(LOCK_FILE);
-
-    // 重試一次原子建檔
-    return tryCreateLock(lockData);
-  } catch {
-    // Lock 檔損壞，嘗試刪除重建
-    try { unlinkSync(LOCK_FILE); } catch { /* ignore */ }
-    return tryCreateLock(lockData);
-  }
-}
-
-function releaseLock(): void {
-  try {
-    const content = readFileSync(LOCK_FILE, 'utf-8');
-    const data = JSON.parse(content) as LockFileContent;
-    // 只刪除自己建立的 lock（驗證 token ownership）
-    if (data.token === lockToken) {
-      unlinkSync(LOCK_FILE);
-    }
-  } catch {
-    // 忽略清理失敗
-  }
-}
-
-// 確保任何情況下都清除 lock
-process.on('exit', releaseLock);
-process.on('SIGINT', () => { releaseLock(); process.exit(130); });
-process.on('SIGTERM', () => { releaseLock(); process.exit(143); });
 
 // ===== 主要邏輯 =====
 
@@ -145,19 +69,40 @@ async function main() {
   const jsonMode = args.includes('--json');
   const results: AutoTradeRunResult[] = [];
 
-  try {
-    // 取得 lock
-    if (!acquireLock()) {
-      if (jsonMode) {
-        console.log(JSON.stringify({ results: [], message: '另一個實例正在執行中' }));
-      }
-      process.exit(0);
-    }
+  ensureDataDir();
 
+  // Fix R5-5: 程式啟動時清理可能因 crash 遺留的 stale peak lock
+  cleanupStalePeakLock();
+
+  // 取得 global lock（防止重疊執行）
+  const lock = acquireLock('auto-trade', 300);
+  if (!lock) {
+    console.log('⚠️ 另一個 auto-trade 正在執行中（global-lock 已持有），跳過本次執行');
+    if (jsonMode) {
+      console.log(JSON.stringify({ results: [], message: '另一個實例正在執行中' }));
+    }
+    process.exit(0);
+  }
+
+  // 確保任何情況下都釋放 lock
+  const cleanup = () => { releaseLock(lock.token); };
+  process.on('exit', cleanup);
+  process.on('SIGINT', () => { cleanup(); process.exit(130); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(143); });
+
+  try {
     // 啟動時清理可能的 .tmp 殘留檔案
     const tmpCleaned = cleanupTmpFiles(DATA_DIR);
     if (tmpCleaned > 0) {
       console.log(`🧹 已清理 ${tmpCleaned} 個殘留 .tmp 檔案`);
+    }
+
+    // Fix #14: 補填 positions.json 和 trades.json 的 strategyId（只跑一次）
+    try {
+      migratePositions();
+      migrateTrades();
+    } catch (err) {
+      console.log(`⚠️ 資料遷移失敗：${err instanceof Error ? err.message : String(err)}`);
     }
 
     const env = getEnvInfo();
@@ -185,6 +130,10 @@ async function main() {
       console.log(`⚠️ 同步初始資金失敗：${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // 讀取 closeOnlySymbols（從 config-envelope）
+    const envelope = getConfigEnvelope();
+    const closeOnlySymbols = new Set(envelope.closeOnlySymbols ?? []);
+
     const autoTrades = getAutoTrades();
     const entries = Object.entries(autoTrades);
     const enabledEntries = entries.filter(([, e]) => e.enabled);
@@ -198,6 +147,9 @@ async function main() {
     }
 
     console.log(`📋 啟用中：${enabledEntries.length} 項`);
+    if (closeOnlySymbols.size > 0) {
+      console.log(`🔒 Close-only 模式：${[...closeOnlySymbols].join(', ')}`);
+    }
     console.log('');
 
     for (const [key, entry] of enabledEntries) {
@@ -231,16 +183,28 @@ async function main() {
         continue;
       }
 
-      // 透過風控包裝器執行（風控 + 分析 + 交易 + 風控記錄）
+      // 建立 ExecutionContext（含 closeOnly 判斷）
+      const symbolUpper = entry.symbol.toUpperCase();
+      const ctx = createExecutionContext(
+        strategy.id,
+        symbolUpper,
+        lock.token, // 傳入 fencing token
+      );
+      // 補充 closeOnly（若在 closeOnlySymbols 中）
+      if (closeOnlySymbols.has(symbolUpper)) {
+        (ctx as { closeOnly: boolean }).closeOnly = true;
+      }
+
+      // 透過風控包裝器執行（風控 + close-only 攔截 + 分析 + 交易 + 風控記錄）
       try {
         console.log(`  📊 分析 + 風控檢查中...`);
-        const strategyResult = await executeWithRisk({ strategy, symbol: entry.symbol });
+        const strategyResult = await executeWithRisk({ strategy, symbol: symbolUpper, ctx });
 
         // 檢查是否被風控攔截（用 flag 判斷，不靠字串比對）
         const resultArray = Array.isArray(strategyResult) ? strategyResult : [strategyResult];
         const isRiskBlocked = resultArray.some((r) => r.riskBlocked === true);
 
-        // 更新自動交易狀態
+        // 更新 auto-trade-runtime（不需鎖）
         updateAutoTradeResult(key, strategyResult);
 
         if (isRiskBlocked) {
@@ -261,13 +225,38 @@ async function main() {
             status: 'executed',
             result: strategyResult,
           });
+
+          // Fix R4-4 (原 Fix #4 R1-7): 若有 SELL 且 symbol 在 closeOnlySymbols，平倉後移除
+          // 改用 isTradingFlat() 同時檢查 exchange balance 和 open orders，而非只看 local positions
+          for (const r of resultArray) {
+            if (r.action === 'SELL' && closeOnlySymbols.has(symbolUpper)) {
+              try {
+                const flatResult = await isTradingFlat(symbolUpper);
+                if (flatResult.isFlat) {
+                  mutateEnvelope(
+                    lock.token,
+                    (env) => {
+                      env.closeOnlySymbols = env.closeOnlySymbols.filter((s) => s !== symbolUpper);
+                    },
+                    `close-only cleanup: ${symbolUpper} 已平倉（isTradingFlat 確認）`,
+                  );
+                  closeOnlySymbols.delete(symbolUpper);
+                  console.log(`  🔓 ${symbolUpper} 已從 closeOnlySymbols 移除（isTradingFlat 確認平倉完成）`);
+                } else {
+                  console.log(`  ℹ️ ${symbolUpper} SELL 完成但尚未完全平倉：${flatResult.blockers.join('; ')}`);
+                }
+              } catch (cleanupErr) {
+                console.log(`  ⚠️ 移除 close-only 標記失敗：${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+              }
+            }
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.log(`  ❌ 錯誤：${msg}`);
         updateAutoTradeResult(key, {
           action: 'HOLD',
-          symbol: entry.symbol,
+          symbol: symbolUpper,
           strategy: entry.strategy,
           reason: `錯誤: ${msg}`,
           timestamp: Date.now(),
@@ -281,7 +270,29 @@ async function main() {
         });
       }
 
+      // Fix R3: 每處理完一個策略後 renew lock，避免長時間 loop 中 lease 過期
+      const renewed = renewLock(lock.token, 300);
+      if (!renewed) {
+        console.log('⚠️ Lock 已遺失或過期（renewLock 失敗），中斷執行');
+        break;
+      }
+
       console.log('');
+    }
+
+    // 每次執行後更新 probation-runtime.peak（若 probation 存在）
+    try {
+      const probationRuntime = getProbationRuntime();
+      if (probationRuntime !== null) {
+        const riskStatus = getRiskStatus();
+        const currentEquity = riskStatus.state.currentEquity;
+        if (currentEquity > probationRuntime.peakSinceActivation) {
+          updateProbationPeak(currentEquity);
+          console.log(`📈 更新 probation 高水位：${currentEquity.toFixed(2)} USDT`);
+        }
+      }
+    } catch (err) {
+      console.log(`⚠️ 更新 probation peak 失敗：${err instanceof Error ? err.message : String(err)}`);
     }
 
     // 摘要

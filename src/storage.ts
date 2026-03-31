@@ -4,7 +4,7 @@
  * 績效計算使用 FIFO 按數量撮合
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { atomicWriteJson } from './utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +32,10 @@ export interface TradeRecord {
   orderId: number;
   /** 交易原因 */
   reason: string;
+  /** 策略 ID */
+  strategyId?: string;
+  /** 設定版本 */
+  configVersion?: number;
 }
 
 export interface TradeFilter {
@@ -72,7 +76,7 @@ function ensureDataDir(): void {
     mkdirSync(DATA_DIR, { recursive: true });
   }
   if (!existsSync(TRADES_FILE)) {
-    writeFileSync(TRADES_FILE, '[]', 'utf-8');
+    atomicWriteJson(TRADES_FILE, []);
   }
 }
 
@@ -88,6 +92,36 @@ function writeTrades(trades: TradeRecord[]): void {
 }
 
 // ===== 公開函式 =====
+
+/** name→id fallback mapping（用於舊資料遷移） */
+const TRADE_ID_MAP: Record<string, string> = {
+  '均線交叉策略': 'ma-cross',
+  'RSI 策略': 'rsi',
+  '網格交易策略': 'grid',
+};
+
+/**
+ * Fix #14: 補填 trades.json 中缺少 strategyId 的記錄
+ * 只跑一次：若所有記錄都有 strategyId 則直接返回
+ */
+export function migrateTrades(): void {
+  const trades = readTrades();
+  const needsMigration = trades.some((t) => !t.strategyId);
+  if (!needsMigration) return;
+
+  let changed = 0;
+  for (const trade of trades) {
+    if (!trade.strategyId) {
+      trade.strategyId = TRADE_ID_MAP[trade.strategy] ?? trade.strategy;
+      changed++;
+    }
+  }
+
+  if (changed > 0) {
+    writeTrades(trades);
+    console.log(`📦 trades.json 遷移：補填 ${changed} 筆 strategyId`);
+  }
+}
 
 /** 記錄一筆交易 */
 export async function recordTrade(trade: TradeRecord): Promise<void> {

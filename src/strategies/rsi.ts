@@ -15,26 +15,31 @@ import {
 import { recordTrade } from '../storage.js';
 import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
 import type { Strategy, BacktestableStrategy, AnalysisResult, StrategyResult } from './base.js';
-
-const RSI_PERIOD = 14;
-const OVERSOLD = 30;
-const OVERBOUGHT = 70;
-const TRADE_RATIO = 0.1;
+import { getStrategyConfig } from '../strategy-config.js';
 
 export const rsiStrategy: Strategy & BacktestableStrategy = {
   name: 'RSI 策略',
-  description: `RSI(${RSI_PERIOD}) 超買超賣訊號`,
+  get description() {
+    const cfg = getStrategyConfig('rsi');
+    return `RSI(${cfg.period}) 超買超賣訊號`;
+  },
 
   async analyze(symbol: string): Promise<AnalysisResult> {
+    const cfg = getStrategyConfig('rsi');
     // 多拉一根，排除最後未收盤的 K 線
-    const klines = await getKlines(symbol, '1h', RSI_PERIOD + 21);
+    const klines = await getKlines(symbol, '1h', cfg.period + 21);
     // 排除最後一根未收盤 K 線
     const closedKlines = klines.slice(0, -1);
     const closePrices = closedKlines.map((k) => k.close);
     return this.analyzeKlines(closePrices, closePrices.length - 1);
   },
 
-  analyzeKlines(closePrices: string[], index: number): AnalysisResult {
+  analyzeKlines(closePrices: string[], index: number, overrides?: Partial<{ period: number; oversold: number; overbought: number }>): AnalysisResult {
+    const baseCfg = getStrategyConfig('rsi');
+    const RSI_PERIOD = overrides?.period ?? baseCfg.period;
+    const OVERSOLD = overrides?.oversold ?? baseCfg.oversold;
+    const OVERBOUGHT = overrides?.overbought ?? baseCfg.overbought;
+
     if (index < RSI_PERIOD + 1) {
       return { signal: 'HOLD', strength: 0, reason: '📊 數據不足，無法計算 RSI' };
     }
@@ -105,10 +110,11 @@ export const rsiStrategy: Strategy & BacktestableStrategy = {
         };
       }
 
+      const { tradeRatio } = getStrategyConfig('rsi');
       const account = await getAccountInfo();
       const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
       const available = parseFloat(usdtBalance?.free ?? '0');
-      const tradeAmount = available * TRADE_RATIO;
+      const tradeAmount = available * tradeRatio;
 
       // 使用 Exchange Info 調整精度
       const precision = await getSymbolPrecision(symbol);

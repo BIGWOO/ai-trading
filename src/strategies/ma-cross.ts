@@ -15,26 +15,30 @@ import {
 import { recordTrade } from '../storage.js';
 import { hasPosition, openPosition, closePosition, getPosition } from '../position.js';
 import type { Strategy, BacktestableStrategy, AnalysisResult, StrategyResult } from './base.js';
-
-const SHORT_PERIOD = 7;
-const LONG_PERIOD = 25;
-/** 每次交易使用可用餘額的比例 */
-const TRADE_RATIO = 0.1;
+import { getStrategyConfig } from '../strategy-config.js';
 
 export const maCrossStrategy: Strategy & BacktestableStrategy = {
   name: '均線交叉策略',
-  description: `MA${SHORT_PERIOD} / MA${LONG_PERIOD} 交叉訊號`,
+  get description() {
+    const cfg = getStrategyConfig('ma-cross');
+    return `MA${cfg.shortPeriod} / MA${cfg.longPeriod} 交叉訊號`;
+  },
 
   async analyze(symbol: string): Promise<AnalysisResult> {
+    const cfg = getStrategyConfig('ma-cross');
     // 多拉一根，排除最後未收盤的 K 線
-    const klines = await getKlines(symbol, '1h', LONG_PERIOD + 6);
+    const klines = await getKlines(symbol, '1h', cfg.longPeriod + 6);
     // 排除最後一根未收盤 K 線
     const closedKlines = klines.slice(0, -1);
     const closePrices = closedKlines.map((k) => k.close);
     return this.analyzeKlines(closePrices, closePrices.length - 1);
   },
 
-  analyzeKlines(closePrices: string[], index: number): AnalysisResult {
+  analyzeKlines(closePrices: string[], index: number, overrides?: Partial<{ shortPeriod: number; longPeriod: number }>): AnalysisResult {
+    const baseCfg = getStrategyConfig('ma-cross');
+    const SHORT_PERIOD = overrides?.shortPeriod ?? baseCfg.shortPeriod;
+    const LONG_PERIOD = overrides?.longPeriod ?? baseCfg.longPeriod;
+
     if (index < LONG_PERIOD) {
       return { signal: 'HOLD', strength: 0, reason: '📊 數據不足，無法計算均線' };
     }
@@ -117,10 +121,11 @@ export const maCrossStrategy: Strategy & BacktestableStrategy = {
         };
       }
 
+      const { tradeRatio } = getStrategyConfig('ma-cross');
       const account = await getAccountInfo();
       const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
       const available = parseFloat(usdtBalance?.free ?? '0');
-      const tradeAmount = available * TRADE_RATIO;
+      const tradeAmount = available * tradeRatio;
 
       // 使用 Exchange Info 調整精度
       const precision = await getSymbolPrecision(symbol);

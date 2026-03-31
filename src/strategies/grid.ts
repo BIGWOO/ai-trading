@@ -17,6 +17,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { atomicWriteJson } from '../utils/atomic-write.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getStrategyConfig } from '../strategy-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, '..', '..', 'data');
@@ -52,10 +53,7 @@ interface GridState {
   active: boolean;
 }
 
-/** 預設網格設定（會根據當前價格自動調整） */
-const DEFAULT_GRID_PERCENT = 0.05; // 上下 5% 區間
-const DEFAULT_GRID_COUNT = 10;
-const DEFAULT_TRADE_RATIO = 0.05; // 每格用 5% 餘額
+// 預設值已移至 strategy-config.ts，此處透過 getStrategyConfig('grid') 動態取得
 
 // ===== 網格狀態管理 =====
 
@@ -117,6 +115,7 @@ export const gridStrategy: Strategy = {
   description: '在價格區間內等距掛買賣單，適合震盪行情',
 
   async analyze(symbol: string): Promise<AnalysisResult> {
+    const cfg = getStrategyConfig('grid');
     const priceInfo = await getPrice(symbol);
     const currentPrice = parseFloat(priceInfo.price);
 
@@ -139,9 +138,9 @@ export const gridStrategy: Strategy = {
     }
 
     // 根據當前價格自動計算網格區間
-    const upperPrice = currentPrice * (1 + DEFAULT_GRID_PERCENT);
-    const lowerPrice = currentPrice * (1 - DEFAULT_GRID_PERCENT);
-    const gridSize = (upperPrice - lowerPrice) / DEFAULT_GRID_COUNT;
+    const upperPrice = currentPrice * (1 + cfg.gridPercent);
+    const lowerPrice = currentPrice * (1 - cfg.gridPercent);
+    const gridSize = (upperPrice - lowerPrice) / cfg.gridCount;
 
     return {
       signal: 'BUY', // 網格策略總是要掛單
@@ -149,7 +148,7 @@ export const gridStrategy: Strategy = {
       reason: [
         `📊 網格設定：`,
         `   價格區間: ${lowerPrice.toFixed(2)} ~ ${upperPrice.toFixed(2)}`,
-        `   網格數: ${DEFAULT_GRID_COUNT}`,
+        `   網格數: ${cfg.gridCount}`,
         `   每格間距: ${gridSize.toFixed(2)}`,
         `   當前價格: ${currentPrice.toFixed(2)}`,
         `   模式: 新建`,
@@ -159,6 +158,7 @@ export const gridStrategy: Strategy = {
   },
 
   async execute(symbol: string, _result: AnalysisResult): Promise<StrategyResult[]> {
+    const cfg = getStrategyConfig('grid');
     const upperSymbol = symbol.toUpperCase();
 
     const priceInfo = await getPrice(symbol);
@@ -171,7 +171,7 @@ export const gridStrategy: Strategy = {
     // 計算可用餘額和每格數量
     const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
     const available = parseFloat(usdtBalance?.free ?? '0');
-    const perGridAmount = available * DEFAULT_TRADE_RATIO;
+    const perGridAmount = available * cfg.tradeRatio;
     const rawQty = perGridAmount / currentPrice;
     const quantityPerGrid = adjustQuantity(precision.stepSize, rawQty);
 
@@ -241,9 +241,9 @@ export const gridStrategy: Strategy = {
 
     // 新建模式
     const config: GridConfig = {
-      upperPrice: currentPrice * (1 + DEFAULT_GRID_PERCENT),
-      lowerPrice: currentPrice * (1 - DEFAULT_GRID_PERCENT),
-      gridCount: DEFAULT_GRID_COUNT,
+      upperPrice: currentPrice * (1 + cfg.gridPercent),
+      lowerPrice: currentPrice * (1 - cfg.gridPercent),
+      gridCount: cfg.gridCount,
       quantityPerGrid,
     };
 

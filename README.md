@@ -28,6 +28,11 @@
 - 🤖 **AI 代理整合** — 搭配 [OpenClaw](https://github.com/openclaw/openclaw) 實現 Discord 指令操作
 - 📈 **歷史回測** — 用真實 K 線數據驗證策略績效
 - 🏗️ **零依賴架構** — 僅使用 Node.js 原生 `crypto`、`fetch`，無第三方 HTTP 庫
+- 📐 **Walk-Forward 優化** — 多折 out-of-sample 測試 + Holdout 閘門，自動找出最佳參數
+- 🧬 **自我進化系統** — 10 步驟全自動策略進化，含 Probation 保護期與 Mode B 回滾
+- 🌍 **市場狀態偵測** — ADX/DI/ATR 四態分類（上升/下降/橫盤/高波動）
+- 📓 **交易日誌與覆盤** — JSONL 格式永久記錄，自動分析勝率與調參建議
+- 📋 **日報 / 週報** — 每日 PnL 統計 + 七天走勢 emoji 圖表，自動推送 Discord
 
 ---
 
@@ -145,6 +150,252 @@ npx tsx scripts/run-strategy.ts rsi ETHUSDT
 
 ```bash
 npx tsx scripts/run-strategy.ts grid BTCUSDT
+```
+
+---
+
+## 📐 Walk-Forward 優化
+
+用真實歷史數據做 **out-of-sample** 參數優化，避免過度擬合：
+
+```bash
+# 優化 MA Cross 策略（BTCUSDT 1h，500 根 K 線）
+npx tsx scripts/optimize.ts ma-cross BTCUSDT 1h 500
+
+# 優化 RSI 策略（ETHUSDT 4h）
+npx tsx scripts/optimize.ts rsi ETHUSDT 4h 300
+```
+
+### 優化流程
+
+```
+全部 K 線（N 根）
+├── 可用集（85%）
+│   ├── Fold 1: Train [0→A) → Test [A→B)
+│   ├── Fold 2: Train [0→B) → Test [B→C)  ← Anchored Expanding
+│   └── Fold 3: Train [0→C) → Test [C→D)
+└── Holdout（最後 15%，最終驗證，不參與訓練/測試）
+```
+
+### 閘門條件（全部通過才採用參數）
+
+| 閘門 | 條件 |
+|------|------|
+| ① 交易次數 | 每折 ≥ 3 筆 |
+| ② 平均 Sharpe | > 0 |
+| ③ Holdout Sharpe | > 0 |
+| ④ 各折最大回撤 | < 15% |
+
+### 輸出範例
+
+```
+🔬 Walk-Forward 參數優化
+═══════════════════════════════════════
+  策略：ma-cross  幣對：BTCUSDT  間隔：1h  K線數：500
+
+📐 Fold 配置：
+  Fold 1: Train [0-212) → Test [212-283)
+  Fold 2: Train [0-283) → Test [283-354)
+  Fold 3: Train [0-354) → Test [354-424)
+  Holdout: [424-499)
+
+🏆 最佳參數組合：
+  shortPeriod: 7
+  longPeriod: 25
+  平均 Sharpe: 0.8523
+
+📊 各折結果：
+  Fold 1: Return=3.21% | Sharpe=0.9102 | Trades=8 | DD=4.12% | WR=62.5%
+  Fold 2: Return=1.87% | Sharpe=0.7241 | Trades=6 | DD=3.55% | WR=50.0%
+  Fold 3: Return=2.54% | Sharpe=0.9227 | Trades=7 | DD=5.01% | WR=57.1%
+
+🔒 Holdout 結果：
+  Return=1.95% | Sharpe=0.8100 | Trades=5 | DD=2.88% | WR=60.0%
+
+✅ 通過所有閘門！
+```
+
+> **注意：** Grid 策略不參與 Walk-Forward 優化（網格策略靠人工設定區間）。
+
+---
+
+## 🧬 自我進化系統
+
+每天自動執行 10 步驟進化，讓策略參數跟上市場變化：
+
+```bash
+# 手動觸發一次進化
+npx tsx scripts/evolve.ts
+
+# 或透過 CLI
+npx tsx src/index.ts evolve
+
+# JSON 模式（供 cron 解析）
+npx tsx scripts/evolve.ts --json
+```
+
+### 進化流程（v7 Self-Evolution Plan）
+
+```
+Step 1  讀取 config-envelope → 確認 evolution.enabled = true
+Step 2  acquireLock('evolve')  ← 防止併發進化
+Step 3  Probation 檢查
+        ├─ 到期 → 🎓 畢業，解除 close-only 限制
+        ├─ Drawdown < 閾值 → 🔙 Mode A 回滾到前版本
+        └─ 進行中 → ⏭️ 跳過優化，等待
+Step 4  偵測市場狀態（ADX/DI/ATR）
+Step 5  覆盤最近 7 天交易（勝率、PnL、建議）
+Step 6  Walk-Forward 優化（排除 Grid）
+Step 7  通過閘門 → CAS 更新 config-envelope + 啟動 Probation
+        ├─ 參數變化超過 ±30% → 跳過，避免激進調整
+        └─ Probation 期間：以 Drawdown 監控新參數表現
+Step 8  策略切換評估（需先確認平倉）
+Step 9  Mode B 回滾檢查
+        └─ 連續 3 次優化績效衰退 + 確認無持倉 → 回滾到 lastStableVersion
+Step 10 輸出進化摘要
+```
+
+### 啟用自動進化
+
+在 `data/config-envelope.json` 中開啟：
+
+```json
+{
+  "evolutionConfig": {
+    "enabled": true,
+    "intervalHours": 24,
+    "probationHours": 48,
+    "rollbackThresholdPercent": -5,
+    "adjustmentLimit": 0.3
+  }
+}
+```
+
+> ⚠️ **Probation 保護期**：每次參數更新後，系統進入 `probationHours` 的觀察期。若 Drawdown 超過 `rollbackThresholdPercent`（預設 -5%），自動回滾到前版本並加入 close-only 清單，等待平倉後才解除。
+
+---
+
+## 🌍 市場狀態偵測
+
+用 ADX（平均方向指標）和 ATR（真實波幅）自動分類當前市場狀態：
+
+```bash
+# 偵測 BTCUSDT 當前市場狀態
+npx tsx src/index.ts regime
+
+# 指定幣對
+npx tsx src/index.ts regime ETHUSDT
+```
+
+### 四種市場狀態
+
+| 狀態 | 判斷條件 | 說明 |
+|------|----------|------|
+| 📈 上升趨勢 | ADX > 25 且 +DI > -DI | 趨勢明確向上，適合趨勢跟隨策略 |
+| 📉 下降趨勢 | ADX > 25 且 -DI > +DI | 趨勢明確向下，謹慎操作 |
+| ↔️ 橫盤整理 | ADX < 20 | 無明顯趨勢，適合網格或 RSI 策略 |
+| 🌊 高波動 | ATR/Price > 3% | 波動劇烈，風控優先 |
+
+```
+🌍 BTCUSDT 市場狀態：
+═══════════════════════════════════════
+  📈 上升趨勢（ADX = 31.4，+DI = 28.7 > -DI = 15.2）
+  ADX: 31.4 | +DI: 28.7 | -DI: 15.2
+  ATR/Price: 1.23%
+```
+
+---
+
+## 📓 交易日誌與覆盤
+
+每筆交易自動寫入 `data/trade-journal.jsonl`，包含指標快照和市場狀態。
+
+```bash
+# 查看最近 10 筆交易日誌
+npx tsx src/index.ts journal
+
+# 查看最近 20 筆
+npx tsx src/index.ts journal 20
+
+# 覆盤最近 7 天
+npx tsx src/index.ts review
+
+# 覆盤最近 14 天
+npx tsx src/index.ts review 14
+```
+
+### 覆盤輸出
+
+```
+📋 交易覆盤（過去 7 天）
+═══════════════════════════════════════
+  📊 總交易次數：12
+  🟢 買入：6  🔴 賣出：6  ⏸️ 觀望：24
+  💰 總損益：+8.42 USDT
+  🎯 勝率：66.7%
+  📈 平均損益：+1.40 USDT
+
+💡 建議：
+  ✅ 勝率優秀（> 70%），當前參數表現良好
+```
+
+---
+
+## 📋 日報 / 週報
+
+自動彙整交易數據，生成人類友善的 Discord 格式報告。
+
+```bash
+# 日報（過去 24 小時）
+npx tsx scripts/daily-report.ts
+npx tsx src/index.ts report daily
+
+# 週報（過去 7 天）
+npx tsx scripts/weekly-report.ts
+npx tsx src/index.ts report weekly
+
+# JSON 模式（供自動化解析）
+npx tsx scripts/daily-report.ts --json
+npx tsx scripts/weekly-report.ts --json
+```
+
+### 日報範例
+
+```
+📊 日報 — 2026/04/01
+
+🌍 市場狀態：📈 上升趨勢
+⚙️ Config Version: v7
+
+📈 交易摘要
+• 交易次數：4（🟢 2 買 / 🔴 2 賣）
+• 總損益：📈 +5.32 USDT
+• 勝率：100.0%（✅ 2 勝 / ❌ 0 敗）
+• 最大回撤：0.00 USDT
+```
+
+### 週報範例（含每日 PnL 圖表）
+
+```
+📊 週報 — 2026/03/26 ~ 2026/04/01
+
+📈 一週概覽
+• 總交易次數：28
+• 總損益：📈 +32.18 USDT
+• 勝率：64.3%
+
+📅 每日 PnL
+• 03/26 🟩🟩🟩 +8.20 (4 筆)
+• 03/27 🟥🟥 -3.10 (2 筆)
+• 03/28 🟩🟩🟩🟩 +12.50 (6 筆)
+• 03/29 ── 0.00 (0 筆)
+• 03/30 🟩🟩 +5.80 (3 筆)
+• 03/31 🟥 -1.42 (2 筆)
+• 04/01 🟩🟩🟩 +10.20 (4 筆)
+
+🧬 進化事件
+• 🔬 03/29 [optimization] ma-cross: Walk-Forward 優化通過 (Sharpe: 0.8523)
+• 🎓 03/31 [graduation] ma-cross: Probation 到期，參數畢業
 ```
 
 ---
@@ -268,6 +519,10 @@ MAX_ORDER_USDT=100
 | `npx tsx scripts/run-strategy.ts <策略> [幣對] [--json]` | 執行單次策略 |
 | `npx tsx scripts/backtest.ts <策略> [幣對] [間隔] [數量]` | 歷史回測 |
 | `npx tsx scripts/auto-trade.ts [--json]` | 自動交易（排程呼叫） |
+| `npx tsx scripts/optimize.ts <策略> [幣對] [間隔] [K線數]` | Walk-Forward 參數優化 |
+| `npx tsx scripts/evolve.ts [--json]` | 手動觸發自我進化 |
+| `npx tsx scripts/daily-report.ts [--json]` | 生成日報 |
+| `npx tsx scripts/weekly-report.ts [--json]` | 生成週報 |
 
 ### CLI 統一入口
 
@@ -290,6 +545,12 @@ npx tsx src/index.ts <命令>
 | `auto disable <策略> <幣對>` | 停用自動交易 |
 | `risk` | 查看風控狀態 |
 | `risk reset` | 重置當日風控 |
+| `evolve` | 手動觸發自動進化 |
+| `regime [幣對]` | 查看市場狀態（ADX/DI/ATR）|
+| `journal [N]` | 查看最近 N 筆交易日誌（預設 10）|
+| `review [天數]` | 覆盤最近 N 天交易（預設 7）|
+| `report daily` | 日報（過去 24 小時）|
+| `report weekly` | 週報（過去 7 天）|
 
 ---
 
@@ -298,28 +559,49 @@ npx tsx src/index.ts <命令>
 ```
 ai-trading/
 ├── src/
-│   ├── binance.ts          # Binance API 封裝（HMAC 簽名、延遲載入、URL 白名單）
-│   ├── index.ts            # CLI 統一入口
-│   ├── trade-executor.ts   # 統一交易執行包裝器（風控 → 分析 → 執行 → 記錄）
-│   ├── risk-control.ts     # 四層風控引擎
-│   ├── position.ts         # 持倉管理（FIFO by symbol）
-│   ├── storage.ts          # 交易紀錄持久化
-│   ├── scheduler.ts        # 自動交易排程管理
+│   ├── binance.ts            # Binance API 封裝（HMAC 簽名、延遲載入、URL 白名單）
+│   ├── index.ts              # CLI 統一入口
+│   ├── trade-executor.ts     # 統一交易執行包裝器（風控 → 分析 → 執行 → 記錄）
+│   ├── risk-control.ts       # 四層風控引擎
+│   ├── position.ts           # 持倉管理（FIFO by symbol）
+│   ├── storage.ts            # 交易紀錄持久化
+│   ├── scheduler.ts          # 自動交易排程管理
+│   ├── market-regime.ts      # 市場狀態偵測（ADX/DI/ATR，四態分類）
+│   ├── trade-journal.ts      # 交易日誌（JSONL 格式持久化）
+│   ├── trade-review.ts       # 交易覆盤分析與建議
+│   ├── execution-context.ts  # 執行上下文 + 參數驗證（validateStrategyParams）
+│   ├── backtest-engine.ts    # 回測引擎（供優化使用）
+│   ├── strategy-config.ts    # 策略參數定義與預設值
 │   ├── strategies/
-│   │   ├── base.ts         # 策略介面定義
-│   │   ├── ma-cross.ts     # MA7/MA25 交叉策略
-│   │   ├── rsi.ts          # RSI(14) 超買超賣策略
-│   │   └── grid.ts         # 網格交易策略
+│   │   ├── base.ts           # 策略介面定義
+│   │   ├── ma-cross.ts       # MA7/MA25 交叉策略
+│   │   ├── rsi.ts            # RSI(14) 超買超賣策略
+│   │   └── grid.ts           # 網格交易策略
 │   └── utils/
-│       └── atomic-write.ts # 原子 JSON 寫入工具
+│       ├── atomic-write.ts   # 原子 JSON 寫入工具
+│       ├── config-envelope.ts # ConfigEnvelope 讀寫（CAS 保護）
+│       ├── config-ops.ts     # mutateEnvelope helper
+│       ├── config-history.ts # 版本快照管理（rollback 來源）
+│       ├── global-lock.ts    # 全域 fencing lock
+│       ├── evolution-log.ts  # 進化事件日誌
+│       ├── probation-runtime.ts # Probation 執行時狀態
+│       └── flat-check.ts     # 平倉狀態檢查（Mode B 回滾用）
 ├── scripts/
-│   ├── check-balance.ts    # 查餘額
-│   ├── check-price.ts      # 查價格
-│   ├── run-strategy.ts     # 單次策略執行
-│   ├── backtest.ts         # 歷史回測
-│   └── auto-trade.ts       # 自動交易入口（含 lock file）
-├── data/                   # 執行時狀態資料（git ignored）
-├── .env.example            # 環境變數範例
+│   ├── check-balance.ts      # 查餘額
+│   ├── check-price.ts        # 查價格
+│   ├── run-strategy.ts       # 單次策略執行
+│   ├── backtest.ts           # 歷史回測
+│   ├── auto-trade.ts         # 自動交易入口（含 lock file）
+│   ├── optimize.ts           # Walk-Forward 參數優化
+│   ├── evolve.ts             # 自我進化主程式（10 步驟）
+│   ├── daily-report.ts       # 日報生成
+│   └── weekly-report.ts      # 週報生成
+├── data/                     # 執行時狀態資料（git ignored）
+│   ├── config-envelope.json  # 策略設定控制平面（含 probation、evolutionConfig）
+│   ├── trade-journal.jsonl   # 交易日誌（JSONL）
+│   ├── evolution-log.jsonl   # 進化事件紀錄
+│   └── _backup/              # 自動備份（遷移時產生）
+├── .env.example              # 環境變數範例
 ├── tsconfig.json
 └── package.json
 ```

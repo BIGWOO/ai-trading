@@ -251,14 +251,16 @@ export const gridStrategy: Strategy = {
       console.log(`\n📐 [${this.name}] 補單模式...`);
       console.log(`   💰 當前價格: ${currentPrice.toFixed(2)}`);
 
-      const existingPrices = new Set(openOrders.map((o) => o.price));
+      // 正規化價格字串，避免 "69239.31" vs "69239.31000000" 比對失敗
+      const normalizePrice = (p: string) => parseFloat(p).toString();
+      const existingPrices = new Set(openOrders.map((o) => normalizePrice(o.price)));
       let addedCount = 0;
       let failedCount = 0;
       let addedBuy = 0;
       let addedSell = 0;
 
       for (const gridPrice of existingGrid.gridPrices) {
-        if (existingPrices.has(gridPrice)) continue; // 已有此價位的單
+        if (existingPrices.has(normalizePrice(gridPrice))) continue; // 已有此價位的單
 
         const gridPriceNum = parseFloat(gridPrice);
         try {

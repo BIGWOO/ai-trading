@@ -93,6 +93,8 @@ export function runBacktest(
     startIndex?: number;
     /** 回測結束 index（預設到最後一根） */
     endIndex?: number;
+    /** 手續費率（預設 0.001，即 0.1%，Binance Spot 標準費率）。買賣各扣一次。 */
+    commissionRate?: number;
   },
 ): BacktestResult {
   const initialCapital = options?.initialCapital ?? 10000;
@@ -100,6 +102,7 @@ export function runBacktest(
   const interval = options?.interval ?? '1h';
   const startIndex = options?.startIndex ?? 0;
   const endIndex = options?.endIndex ?? closePrices.length;
+  const commissionRate = options?.commissionRate ?? 0.001; // Binance 預設 0.1% 手續費
 
   if (closePrices.length < 2) {
     return emptyResult(closePrices);
@@ -119,7 +122,8 @@ export function runBacktest(
     if (analysis.signal === 'BUY' && !position) {
       // 開倉：使用 tradeRatio 比例的資金
       const tradeAmount = capital * tradeRatio;
-      const quantity = tradeAmount / currentPrice;
+      // 扣除買入手續費：實際得到的幣量 = tradeAmount / price * (1 - commission)
+      const quantity = (tradeAmount / currentPrice) * (1 - commissionRate);
 
       if (quantity > 0) {
         position = {
@@ -130,10 +134,14 @@ export function runBacktest(
         capital -= tradeAmount;
       }
     } else if (analysis.signal === 'SELL' && position) {
-      // 平倉
-      const sellValue = position.quantity * currentPrice;
-      const pnl = sellValue - (position.quantity * position.buyPrice);
-      const returnPct = ((currentPrice - position.buyPrice) / position.buyPrice) * 100;
+      // 平倉：扣除賣出手續費
+      const grossSellValue = position.quantity * currentPrice;
+      const sellCommission = grossSellValue * commissionRate;
+      const netSellValue = grossSellValue - sellCommission;
+      // 真正的成本 = 買入時實際花的 USDT = quantity * buyPrice / (1 - commissionRate)
+      const actualCost = position.quantity * position.buyPrice / (1 - commissionRate);
+      const pnl = netSellValue - actualCost;
+      const returnPct = actualCost > 0 ? (pnl / actualCost) * 100 : 0;
 
       trades.push({
         buyIndex: position.buyIndex,
@@ -145,7 +153,7 @@ export function runBacktest(
         returnPct,
       });
 
-      capital += sellValue;
+      capital += netSellValue;
       position = null;
     }
 

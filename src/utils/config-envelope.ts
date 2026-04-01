@@ -86,6 +86,12 @@ export interface EvolutionConfig {
   probationHours: number;
   /** 回滾 drawdown 閾值（%，負數） */
   rollbackThresholdPercent: number;
+  /** 參數調整限制（0.3 = ±30%） */
+  adjustmentLimit?: number;
+  /** 每折最少交易次數 */
+  minTradesPerFold?: number;
+  /** 最大回撤百分比（閘門） */
+  maxDrawdownPercent?: number;
 }
 
 /** Config Envelope 完整結構 */

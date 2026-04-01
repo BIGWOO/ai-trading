@@ -6,6 +6,8 @@
 import { checkRisk, recordTradeForRisk } from './risk-control.js';
 import type { Strategy, StrategyResult } from './strategies/base.js';
 import { createExecutionContext, type ExecutionContext } from './execution-context.js';
+import { appendJournalEntry } from './trade-journal.js';
+import type { JournalEntry } from './trade-journal.js';
 
 export interface ExecuteOptions {
   strategy: Strategy;
@@ -96,6 +98,29 @@ export async function executeWithRisk(options: ExecuteOptions): Promise<Strategy
       if (r.action !== 'HOLD' && r.eventType !== 'order_submitted') {
         recordTradeForRisk({ pnl: r.pnl ?? 0, timestamp: r.timestamp });
       }
+    }
+  }
+
+  // 7. 寫入交易日誌（Phase B-3）
+  for (const r of resultArray) {
+    // 跳過 order_submitted 中間狀態，只記錄最終結果
+    if (r.eventType === 'order_submitted') continue;
+
+    try {
+      const journalEntry: JournalEntry = {
+        timestamp: r.timestamp,
+        strategyId: r.strategyId ?? strategy.id,
+        symbol: r.symbol,
+        action: r.action,
+        price: r.price,
+        quantity: r.quantity,
+        pnl: r.pnl,
+        configVersion: r.configVersion ?? ctx.configVersion,
+        reason: r.reason,
+      };
+      appendJournalEntry(journalEntry);
+    } catch {
+      // 日誌寫入失敗不影響交易
     }
   }
 

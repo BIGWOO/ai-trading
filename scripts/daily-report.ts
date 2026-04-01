@@ -23,6 +23,7 @@ import { getJournalEntriesSince } from '../src/trade-journal.js';
 import type { JournalEntry } from '../src/trade-journal.js';
 import { getKlines } from '../src/binance.js';
 import { detectRegime, formatRegime } from '../src/market-regime.js';
+import type { MarketRegime } from '../src/market-regime.js';
 import { getConfigEnvelope } from '../src/utils/config-envelope.js';
 
 // ===== 型別定義 =====
@@ -120,7 +121,7 @@ export function formatDailyReport(data: DailyReportData): string {
 
   lines.push(`📊 **日報** — ${date}`);
   lines.push('');
-  lines.push(`🌍 市場狀態：${formatRegime(data.regime as import('../src/market-regime.js').MarketRegime)}`);
+  lines.push(`🌍 市場狀態：${formatRegime(data.regime as MarketRegime)}`);
   lines.push(`⚙️ Config Version: v${data.configVersion}`);
   lines.push('');
   lines.push('**📈 交易摘要**');

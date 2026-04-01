@@ -40,8 +40,9 @@ import {
 } from '../src/utils/evolution-log.js';
 import { getLastStableVersion, rollbackToVersion, markGraduated } from '../src/utils/config-history.js';
 import { isTradingFlat } from '../src/utils/flat-check.js';
-import { getKlines } from '../src/binance.js';
+import { getKlines, getAccountInfo } from '../src/binance.js';
 import { detectRegime, formatRegime } from '../src/market-regime.js';
+import type { MarketRegime } from '../src/market-regime.js';
 import { reviewRecentTrades } from '../src/trade-review.js';
 import { optimize } from './optimize.js';
 import type { OptimizeResult } from './optimize.js';
@@ -175,6 +176,20 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
 
         mutateEnvelope(lock.token, (env) => {
           env.probation = null;
+          // 畢業時清除受影響策略的 close-only 限制
+          if (prob.affectedStrategies.length > 0) {
+            const affectedSymbols = new Set<string>();
+            for (const s of prob.affectedStrategies) {
+              for (const key of Object.keys(env.activeStrategies)) {
+                if (key.startsWith(`${s}:`)) {
+                  affectedSymbols.add(key.split(':')[1]);
+                }
+              }
+            }
+            env.closeOnlySymbols = env.closeOnlySymbols.filter(
+              (sym) => !affectedSymbols.has(sym),
+            );
+          }
         }, `probation graduated: v${prob.configVersion}`);
 
         clearProbationRuntime();
@@ -192,14 +207,28 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
         // 重新讀取 envelope
         envelope = getConfigEnvelope();
       } else {
-        // 檢查 drawdown 回滾
+        // 檢查 drawdown 回滾 — 需要取得目前 equity（USDT 餘額）
         if (runtime) {
-          const drawdown = calculateDrawdown(runtime.peakSinceActivation);
+          let currentEquity = 0;
+          try {
+            const account = await getAccountInfo();
+            const usdtBalance = account.balances.find((b) => b.asset === 'USDT');
+            currentEquity = usdtBalance
+              ? parseFloat(usdtBalance.free) + parseFloat(usdtBalance.locked)
+              : 0;
+          } catch (err) {
+            const msg = `⚠️ 無法取得帳戶餘額: ${err instanceof Error ? err.message : String(err)}`;
+            log(`  ${msg}`);
+            report.errors.push(msg);
+          }
+          const drawdown = calculateDrawdown(currentEquity);
           if (drawdown !== null && drawdown < evoConfig.rollbackThresholdPercent) {
             log(`  ⚠️ Drawdown ${drawdown.toFixed(2)}% < ${evoConfig.rollbackThresholdPercent}% → 回滾！`);
 
-            // Mode A 回滾
-            const previousVersion = prob.configVersion - 1;
+            // Mode A 回滾 — 用 lastStableVersion 或 configVersion-1（以較穩定版本為準）
+            const stableVer = getLastStableVersion();
+            const fallbackVer = prob.configVersion > 1 ? prob.configVersion - 1 : 1;
+            const previousVersion = stableVer ?? fallbackVer;
             try {
               const rollbackEnvelope = rollbackToVersion(previousVersion);
               mutateEnvelope(lock.token, (env) => {
@@ -254,10 +283,15 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
       log('  ✅ 無 Probation');
     }
 
-    // Step 4: 偵測市場狀態
+    // Step 4: 偵測市場狀態（用 active 策略的交易對，fallback BTCUSDT）
     log('\n🌍 Step 4: 偵測市場狀態');
+    let regimeSymbol = 'BTCUSDT';
+    for (const key of Object.keys(envelope.activeStrategies)) {
+      const sym = key.split(':')[1];
+      if (sym) { regimeSymbol = sym; break; }
+    }
     try {
-      const klines = await getKlines('BTCUSDT', '1h', 100);
+      const klines = await getKlines(regimeSymbol, '1h', 100);
       const closedKlines = klines.slice(0, -1);
       const regimeResult = detectRegime(
         closedKlines.map((k) => k.close),
@@ -265,7 +299,7 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
         closedKlines.map((k) => k.low),
       );
       report.regime = regimeResult.regime;
-      log(`  ${regimeResult.description}`);
+      log(`  ${regimeResult.description} (${regimeSymbol})`);
     } catch (err) {
       const msg = `⚠️ 市場狀態偵測失敗: ${err instanceof Error ? err.message : String(err)}`;
       log(`  ${msg}`);
@@ -300,18 +334,28 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
     }
 
     for (const strategyId of activeStrategyIds) {
-      log(`\n  📈 優化 ${strategyId}...`);
+      // 從 activeStrategies 取得該策略的實際 symbol 和 interval
+      let targetSymbol = 'BTCUSDT';
+      let targetInterval = '1h';
+      for (const [key, entry] of Object.entries(envelope.activeStrategies)) {
+        if (key.startsWith(`${strategyId}:`)) {
+          targetSymbol = key.split(':')[1] || 'BTCUSDT';
+          targetInterval = entry.interval || '1h';
+          break;
+        }
+      }
+
+      log(`\n  📈 優化 ${strategyId} (${targetSymbol} ${targetInterval})...`);
 
       try {
         // 取得 K 線
-        const defaultSymbol = 'BTCUSDT';
-        const klines = await getKlines(defaultSymbol, '1h', 500);
+        const klines = await getKlines(targetSymbol, targetInterval, 500);
         const closedKlines = klines.slice(0, -1);
         const closePrices = closedKlines.map((k) => k.close);
 
         const result = optimize(strategyId, closePrices, {
-          interval: '1h',
-          symbol: defaultSymbol,
+          interval: targetInterval,
+          symbol: targetSymbol,
         });
 
         report.optimizeResults[strategyId] = result;
@@ -344,6 +388,8 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
           }
 
           // CAS 更新 envelope
+          // 注意：mutateEnvelope 先呼叫 mutator 再 bump configVersion
+          // 所以 probation.configVersion 用佔位值，事後修正
           const oldVersion = envelope.configVersion;
           envelope = mutateEnvelope(lock.token, (env) => {
             const cfg = env.strategyConfigs[strategyId as keyof typeof env.strategyConfigs];
@@ -353,9 +399,11 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
               }
             }
 
-            // Set probation
+            // Set probation — configVersion 佔位，mutateEnvelope 會 bump 到 +1
+            // 所以這裡用 env.configVersion + 1（即新版本）
+            const nextVersion = env.configVersion + 1;
             env.probation = {
-              configVersion: env.configVersion, // will be bumped by mutateEnvelope
+              configVersion: nextVersion,
               activatedAt: Date.now(),
               baselineEquity: 0, // will be set when probation runtime initializes
               affectedStrategies: [strategyId],
@@ -364,14 +412,14 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
             };
           }, `evolve: optimize ${strategyId}`);
 
-          // Fix: probation.configVersion 需要更新為新版本
-          // mutateEnvelope 已經 bump 了 configVersion
-          if (envelope.probation) {
-            envelope.probation.configVersion = envelope.configVersion;
-          }
-
-          // Init probation runtime
-          initProbationRuntime(0); // 初始 equity 由下次交易時更新
+          // Init probation runtime — 用實際帳戶餘額作為初始 equity
+          let initEquity = 0;
+          try {
+            const acct = await getAccountInfo();
+            const usdt = acct.balances.find((b) => b.asset === 'USDT');
+            initEquity = usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : 0;
+          } catch { /* fallback to 0, auto-trade will update peak later */ }
+          initProbationRuntime(initEquity > 0 ? initEquity : 1); // 保底 1 避免 peak=0 導致 drawdown=null
 
           appendEvolutionLog({
             type: 'optimization',
@@ -471,7 +519,7 @@ export async function runEvolution(options?: { json?: boolean }): Promise<Evolve
     // Step 10: 日報摘要
     log('\n📋 Step 10: 進化摘要');
     log('───────────────────────────────────────');
-    if (report.regime) log(`  市場: ${formatRegime(report.regime as import('../src/market-regime.js').MarketRegime)}`);
+    if (report.regime) log(`  市場: ${formatRegime(report.regime as MarketRegime)}`);
     if (report.reviewSummary) log(`  覆盤: ${report.reviewSummary}`);
     if (report.actions.length > 0) {
       log('  動作:');

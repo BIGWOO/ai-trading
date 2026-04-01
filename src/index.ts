@@ -44,6 +44,9 @@ import {
 import { acquireLock, releaseLock } from './utils/global-lock.js';
 import { mutateEnvelope } from './utils/config-ops.js';
 import { createExecutionContext, validateStrategyParams } from './execution-context.js';
+import { getRecentJournalEntries } from './trade-journal.js';
+import { reviewRecentTrades, formatReviewReport } from './trade-review.js';
+import { detectRegime } from './market-regime.js';
 
 const STRATEGIES: Record<string, Strategy> = {
   'ma-cross': maCrossStrategy,
@@ -75,6 +78,12 @@ function showHelp() {
   console.log('    config               查看所有策略設定');
   console.log('    config set <策略> <參數> <值>  修改策略參數');
   console.log('    config reset [策略]  重置為預設值');
+  console.log('    evolve               手動觸發自動進化');
+  console.log('    regime [幣對]         顯示市場狀態');
+  console.log('    journal [N]          顯示最近 N 筆交易日誌');
+  console.log('    review [天數]        覆盤交易');
+  console.log('    report daily         日報');
+  console.log('    report weekly        週報');
   console.log('');
   console.log('  可用策略：');
   for (const [key, strategy] of Object.entries(STRATEGIES)) {
@@ -457,6 +466,72 @@ function handleConfig(subcommand?: string, arg1?: string, arg2?: string, arg3?: 
   console.log('   可用：config / config set / config reset');
 }
 
+async function handleRegime(symbol?: string) {
+  const sym = symbol ?? 'BTCUSDT';
+  const klines = await getKlines(sym, '1h', 100);
+  const closedKlines = klines.slice(0, -1);
+  const result = detectRegime(
+    closedKlines.map((k) => k.close),
+    closedKlines.map((k) => k.high),
+    closedKlines.map((k) => k.low),
+  );
+
+  console.log(`\n🌍 ${sym} 市場狀態：`);
+  console.log('═══════════════════════════════════════');
+  console.log(`  ${result.description}`);
+  console.log(`  ADX: ${result.adx.toFixed(1)} | +DI: ${result.plusDI.toFixed(1)} | -DI: ${result.minusDI.toFixed(1)}`);
+  console.log(`  ATR/Price: ${result.atrRatio.toFixed(2)}%`);
+  console.log('');
+}
+
+function handleJournal(count?: string) {
+  const n = parseInt(count ?? '10', 10);
+  const entries = getRecentJournalEntries(n);
+
+  console.log(`\n📒 最近 ${n} 筆交易日誌：`);
+  console.log('═══════════════════════════════════════');
+
+  if (entries.length === 0) {
+    console.log('  📭 尚無交易日誌');
+  } else {
+    for (const e of entries) {
+      const time = new Date(e.timestamp).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
+      const emoji = e.action === 'BUY' ? '🟢' : e.action === 'SELL' ? '🔴' : '⏸️';
+      const pnlStr = e.pnl !== undefined ? ` PnL: ${e.pnl >= 0 ? '+' : ''}${e.pnl.toFixed(2)}` : '';
+      console.log(`  ${emoji} ${time} ${e.strategyId}/${e.symbol} ${e.action}${e.price ? ` @ ${e.price}` : ''}${pnlStr}`);
+      console.log(`     ${e.reason}`);
+    }
+  }
+  console.log('');
+}
+
+function handleReview(days?: string) {
+  const d = parseInt(days ?? '7', 10);
+  const result = reviewRecentTrades(d);
+  console.log('\n' + formatReviewReport(result));
+}
+
+async function handleReport(subcommand?: string) {
+  if (subcommand === 'daily') {
+    const { generateDailyReport, formatDailyReport } = await import('../scripts/daily-report.js');
+    const data = await generateDailyReport();
+    console.log('\n' + formatDailyReport(data));
+    return;
+  }
+  if (subcommand === 'weekly') {
+    const { generateWeeklyReport, formatWeeklyReport } = await import('../scripts/weekly-report.js');
+    const data = generateWeeklyReport();
+    console.log('\n' + formatWeeklyReport(data));
+    return;
+  }
+  console.log('❌ 用法：report daily / report weekly');
+}
+
+async function handleEvolve() {
+  const { runEvolution } = await import('../scripts/evolve.js');
+  await runEvolution();
+}
+
 async function main() {
   const command = process.argv[2];
   const arg1 = process.argv[3];
@@ -504,6 +579,21 @@ async function main() {
         break;
       case 'config':
         handleConfig(arg1, arg2, process.argv[5], process.argv[6]);
+        break;
+      case 'evolve':
+        await handleEvolve();
+        break;
+      case 'regime':
+        await handleRegime(arg1?.toUpperCase());
+        break;
+      case 'journal':
+        handleJournal(arg1);
+        break;
+      case 'review':
+        handleReview(arg1);
+        break;
+      case 'report':
+        await handleReport(arg1);
         break;
       default:
         console.log(`❌ 未知命令：${command}`);

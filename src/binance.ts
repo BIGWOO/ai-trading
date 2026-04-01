@@ -26,6 +26,12 @@ const ALLOWED_BASE_URLS = [
 const BASE_URL = process.env.BINANCE_BASE_URL ?? 'https://testnet.binance.vision';
 const IS_TESTNET = process.env.BINANCE_TESTNET === 'true';
 
+/**
+ * K 線數據永遠使用 Mainnet API（公開數據，不需 API Key）
+ * Testnet K 線資料極少且不穩定，不適合策略分析
+ */
+const KLINE_BASE_URL = 'https://api.binance.com';
+
 /** 從 URL 中擷取 domain */
 function extractDomain(url: string): string {
   try {
@@ -543,24 +549,43 @@ export async function getKlines(
   interval: string = '1h',
   limit: number = 100,
 ): Promise<Kline[]> {
-  const raw = await publicRequest<unknown[][]>('/api/v3/klines', {
-    symbol: symbol.toUpperCase(),
-    interval,
-    limit,
-  });
+  // K 線數據直接用 Mainnet API（公開數據、資料完整）
+  const qs = toQueryString({ symbol: symbol.toUpperCase(), interval, limit });
+  const url = `${KLINE_BASE_URL}/api/v3/klines${qs ? '?' + qs : ''}`;
 
-  // 將陣列格式轉為物件
-  return raw.map((k) => ({
-    openTime: k[0] as number,
-    open: String(k[1]),
-    high: String(k[2]),
-    low: String(k[3]),
-    close: String(k[4]),
-    volume: String(k[5]),
-    closeTime: k[6] as number,
-    quoteVolume: String(k[7]),
-    trades: k[8] as number,
-  }));
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url);
+      if (shouldRetry(res.status)) {
+        const wait = Math.pow(2, attempt) * 1000;
+        console.log(`⏳ K 線 API 限流 (${res.status})，${wait / 1000} 秒後重試...`);
+        await new Promise((r) => setTimeout(r, wait));
+        continue;
+      }
+      const data = await safeParseJson<unknown[][]>(res) as unknown[][];
+      if (!res.ok) throw new Error(`❌ K 線 API 錯誤: ${res.status}`);
+
+      return data.map((k: unknown[]) => ({
+        openTime: k[0] as number,
+        open: String(k[1]),
+        high: String(k[2]),
+        low: String(k[3]),
+        close: String(k[4]),
+        volume: String(k[5]),
+        closeTime: k[6] as number,
+        quoteVolume: String(k[7]),
+        trades: k[8] as number,
+      }));
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < 2) {
+        const wait = Math.pow(2, attempt) * 1000;
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+  }
+  throw lastError ?? new Error('❌ K 線 API 請求失敗');
 }
 
 /** 下單（支援 LIMIT 和 MARKET），自動調整精度 */

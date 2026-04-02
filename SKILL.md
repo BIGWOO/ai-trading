@@ -113,7 +113,7 @@ description: >
 openclaw cron add \
   --name "ai-trading-auto" \
   --every 5m \
-  --message "執行自動交易：cd <專案目錄> && npx tsx scripts/auto-trade.ts --json。把結果摘要回報，包含：策略名稱、訊號（BUY/SELL/HOLD）、原因。有成交則報告價格和數量。HOLD 時簡短回報即可。" \
+  --message "執行自動交易：cd <專案目錄> && npx tsx scripts/auto-trade.ts --json。把結果摘要回報，格式範例：'🤖 自動交易 — MM/DD HH:mm（測試網）| ETH/USDT ma-cross | 📊 HOLD：多頭排列，等待交叉'。不要自行計算或顯示「下次約」時間。有成交則報告價格和數量。風控攔截或錯誤要完整報告原因。" \
   --announce \
   --model sonnet \
   --timeout 60000 \
